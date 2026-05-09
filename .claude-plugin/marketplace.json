@@ -1,0 +1,22 @@
+{
+  "name": "claude-video-local-whisperx",
+  "metadata": {
+    "description": "Fork of bradautomates/claude-video that routes Whisper transcription to a self-hosted WhisperX LXC instead of Groq/OpenAI. Zero paid API surface."
+  },
+  "owner": {
+    "name": "Dinesh Raj",
+    "url": "https://github.com/dinesh01ameh"
+  },
+  "plugins": [
+    {
+      "name": "watch",
+      "description": "Watch a video (URL or local path). Downloads with yt-dlp, extracts frames with ffmpeg, transcribes via captions or local WhisperX.",
+      "author": {
+        "name": "Dinesh Raj"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/dinesh01ameh/claude-video-local-whisperx"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "watch",
+  "version": "0.2.0-local-whisperx",
+  "description": "Let Claude watch a video using a LOCAL WhisperX server (no paid APIs). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls captions or falls back to a self-hosted WhisperX LXC, and hands frames + transcript to Claude.",
+  "author": {
+    "name": "Dinesh Raj",
+    "url": "https://github.com/dinesh01ameh"
+  },
+  "homepage": "https://github.com/dinesh01ameh/claude-video-local-whisperx",
+  "repository": "https://github.com/dinesh01ameh/claude-video-local-whisperx",
+  "license": "MIT",
+  "keywords": ["video", "watch", "youtube", "vimeo", "tiktok", "transcription", "whisperx", "yt-dlp", "ffmpeg", "multimodal", "frames", "self-hosted", "local"],
+  "upstream": {
+    "name": "bradautomates/claude-video",
+    "version": "0.1.3",
+    "url": "https://github.com/bradautomates/claude-video"
+  }
+}
