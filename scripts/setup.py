@@ -71,7 +71,14 @@ def _check_binaries() -> list[str]:
 
 
 def _check_file_permissions(path: Path) -> None:
-    """Warn to stderr if a config file is world/group readable."""
+    """Warn to stderr if a config file is world/group readable.
+
+    Skipped on Windows: NTFS uses ACLs, not POSIX mode bits, so st_mode
+    always reports 0o666 even on a properly-locked-down file. The warning
+    would be both wrong and noisy.
+    """
+    if platform.system() == "Windows":
+        return
     try:
         mode = path.stat().st_mode
         if mode & 0o044:
@@ -92,7 +99,8 @@ def _read_env_key(name: str) -> str | None:
         return None
     _check_file_permissions(CONFIG_FILE)
     try:
-        for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+        # utf-8-sig strips the BOM that Windows PowerShell's Set-Content -Encoding utf8 writes.
+        for line in CONFIG_FILE.read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
