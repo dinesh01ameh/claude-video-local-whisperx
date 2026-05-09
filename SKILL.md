@@ -156,6 +156,73 @@ This skill burns tokens primarily on frames. Order of magnitude:
 
 If you already watched a video this session and the user asks a follow-up, do **not** re-run the script — you already have the frames and transcript in context. Just answer from what you have.
 
+## NotebookLM-ready output (Triage Knowledge System integration)
+
+When the user asks for output suitable for **pasting into a NotebookLM topic notebook as a text source**, follow this template. NLM cannot see the JPEG frames directly, so the template embeds your frame descriptions inline at their timestamps — that is the value-add this skill provides over feeding NLM a YouTube URL alone.
+
+### When to use this template
+
+- User says "watch this and put it in NLM" / "feed this to my [topic] notebook" / "make it NLM-ready"
+- User is in a Triage session and the source is a video — the NLM topic notebook is the persistent home for the source
+- Default to this format whenever the video is going into long-lived knowledge storage rather than a one-off question
+
+### Template (emit verbatim, fill in the bracketed fields)
+
+```markdown
+# [Video title — match the source title exactly]
+
+**Source:** [URL or local path]
+**Uploader / channel:** [if known from yt-dlp metadata]
+**Duration:** [HH:MM:SS]
+**Watched:** [ISO date, today]
+**Transcript source:** [captions | local-whisperx]
+
+## What this video is
+
+[3-5 sentences. Plain language. What it actually covers — strip marketing claims. Name the speaker(s). State the genre: lecture, demo, walkthrough, interview, ad, etc.]
+
+## Key claims and arguments
+
+[Bullet list of the substantive claims made, in the order they appear. Each bullet is one tight sentence + the timestamp range where it's discussed. Skip filler / intros / outros / sponsor reads.]
+
+- [HH:MM-HH:MM] [Claim or argument]
+- [HH:MM-HH:MM] [Claim or argument]
+
+## What's on screen (frame-grounded observations)
+
+[Bullet list. ONLY include observations from frames that add information beyond what's said. Skip frames that show only a talking head with nothing on screen. Examples worth including: code on screen, data tables, slides, charts, UI demos, product screenshots, written-out frameworks, on-screen quotes.]
+
+- [HH:MM] [What is shown and why it matters]
+- [HH:MM] [What is shown and why it matters]
+
+## Direct quotes worth preserving
+
+[2-6 verbatim quotes from the transcript that carry the highest information density. Use blockquote markdown. Include speaker if multiple speakers.]
+
+> [HH:MM] "[Exact quote]" — [speaker if relevant]
+
+## Open questions / unverified claims
+
+[Bullet list of claims the speaker made that need external verification before being treated as fact. If the video is purely instructional with no contested claims, omit this section.]
+
+## Tags
+
+[Comma-separated tags relevant to the user's project structure. Default tags: video, [topic-name]. Add project tags (mms, pkc, amrocky, sheeltron, serversupply, byrefab) only if the content is directly applicable to that project.]
+```
+
+### Style rules for NLM-ready output
+
+- **No hedging.** Don't write "the speaker seems to suggest" — either they said it (quote it) or they didn't.
+- **No transcript dump.** Never paste the full transcript into the NLM source — NLM already pulls the YouTube transcript on its own. The value here is your synthesis + frame-grounded observations.
+- **Cite timestamps for every claim.** NLM grounds responses on timestamps; bare claims with no timestamps are demoted by NLM's retrieval.
+- **Frame observations only when frames add signal.** A frame of a person talking is not a frame observation. A frame of their slide deck or their screen is.
+- **No emojis. No "key takeaways" header.** NLM users get noise from those; treat this as a research note, not a blog post.
+- **One template, one paste.** Output the entire template as one Markdown block the user can copy in a single action.
+
+### After producing the template
+
+Tell the user, in one line: "NLM-ready summary above. Paste it into your `[topic name]` notebook as a text source." Do not summarize the summary in chat.
+
 ## Security & Permissions
 
 **What this skill does:**
