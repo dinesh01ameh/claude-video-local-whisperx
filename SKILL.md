@@ -156,6 +156,23 @@ This skill burns tokens primarily on frames. Order of magnitude:
 
 If you already watched a video this session and the user asks a follow-up, do **not** re-run the script — you already have the frames and transcript in context. Just answer from what you have.
 
+## Project folder & dashboard
+
+Set the env var `WATCH_PROJECT_DIR` to a folder you keep your knowledge work in (e.g. `D:\Ai-work\Triage\Triage Knowledge System` on Windows). When set:
+
+- Per-run working dirs go under `<project>/.watch-cache/watch-<hash>/` instead of system temp. Files there are visible to the Read tool in both Cowork and Claude Code.
+- After every run, `<project>/.watch-cache/index.json` gets a new record and `<project>/.watch-cache/dashboard.html` is regenerated.
+
+Open `dashboard.html` in any browser to see every video you've processed: title, uploader, source URL, duration, frame count, transcript source, work-dir link, status. Sortable, filterable, no external dependencies. Self-contained — opens fine on `file://`.
+
+If `WATCH_PROJECT_DIR` is unset, the skill falls back to system temp (no manifest, no dashboard) — same behavior as upstream.
+
+To set the env var:
+- Windows: `[System.Environment]::SetEnvironmentVariable("WATCH_PROJECT_DIR", "D:\Ai-work\Triage\Triage Knowledge System", "User")` (in PowerShell, then restart your shell or Claude Code)
+- macOS/Linux: `export WATCH_PROJECT_DIR=~/triage-knowledge` in `~/.zshrc` / `~/.bashrc`
+
+The `--out-dir` flag still works and overrides this — useful for one-off runs you don't want recorded in the dashboard.
+
 ## NotebookLM-ready output (Triage Knowledge System integration)
 
 When the user asks for output suitable for **pasting into a NotebookLM topic notebook as a text source**, follow this template. NLM cannot see the JPEG frames directly, so the template embeds your frame descriptions inline at their timestamps — that is the value-add this skill provides over feeding NLM a YouTube URL alone.

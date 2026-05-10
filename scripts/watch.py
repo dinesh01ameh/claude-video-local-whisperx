@@ -7,18 +7,40 @@ then Reads each frame path to see the video.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from dashboard import render_dashboard, update_manifest  # noqa: E402
 from download import download, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract, format_time, get_metadata, parse_time  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
+
+
+def _resolve_project_dir(explicit_out_dir: str | None) -> tuple[Path | None, Path | None]:
+    """Return (project_dir, cache_dir) honoring WATCH_PROJECT_DIR env var.
+
+    Resolution rules (first match wins):
+      1. If WATCH_PROJECT_DIR is set, use it. Per-run dirs go in <project>/.watch-cache/
+         and the dashboard manifest lives there too.
+      2. If --out-dir is provided, no project semantics — caller controls layout.
+      3. Otherwise None — fall through to system temp.
+
+    Returns (project_dir or None, cache_dir or None).
+    """
+    project_env = os.environ.get("WATCH_PROJECT_DIR", "").strip()
+    if project_env:
+        project = Path(project_env).expanduser().resolve()
+        return project, project / ".watch-cache"
+    return None, None
 
 
 def main() -> int:
@@ -48,12 +70,18 @@ def main() -> int:
 
     max_frames = min(args.max_frames, 100)
 
+    project_dir, cache_dir = _resolve_project_dir(args.out_dir)
     if args.out_dir:
         work = Path(args.out_dir).expanduser().resolve()
+        work.mkdir(parents=True, exist_ok=True)
+    elif cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="watch-", dir=str(cache_dir)))
     else:
         work = Path(tempfile.mkdtemp(prefix="watch-"))
-    work.mkdir(parents=True, exist_ok=True)
     print(f"[watch] working dir: {work}", file=sys.stderr)
+    if project_dir is not None:
+        print(f"[watch] project dir: {project_dir}", file=sys.stderr)
 
     print(
         "[watch] downloading via yt-dlp…" if is_url(args.source) else "[watch] using local file…",
@@ -222,6 +250,49 @@ def main() -> int:
     print()
     print("---")
     print(f"_Work dir: `{work}` — delete when done._")
+
+    # Manifest update + dashboard regen (only when WATCH_PROJECT_DIR is in play).
+    # Failure here must never break the run — log to stderr and move on.
+    if project_dir is not None:
+        try:
+            first_frame_path = str(frames[0]["path"]) if frames else None
+            transcript_preview = ""
+            if transcript_segments:
+                transcript_preview = " ".join(
+                    seg.get("text", "") for seg in transcript_segments[:3]
+                )[:240]
+
+            record = {
+                "id": work.name,
+                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "source": args.source,
+                "title": (info.get("title") if isinstance(info, dict) else None),
+                "uploader": (info.get("uploader") if isinstance(info, dict) else None),
+                "duration_seconds": full_duration,
+                "resolution": (
+                    f"{meta['width']}x{meta['height']}"
+                    if meta.get("width") and meta.get("height") else None
+                ),
+                "codec": meta.get("codec"),
+                "frames_count": len(frames),
+                "fps": round(fps, 3),
+                "transcript_source": transcript_source or "none",
+                "transcript_segment_count": len(transcript_segments) if transcript_segments else 0,
+                "transcript_preview": transcript_preview,
+                "work_dir": str(work),
+                "first_frame_path": first_frame_path,
+                "status": "complete" if frames else "failed",
+            }
+
+            manifest_path = (project_dir / ".watch-cache" / "index.json")
+            update_manifest(manifest_path, record)
+            render_dashboard(manifest_path, project_dir / ".watch-cache" / "dashboard.html")
+            print(
+                f"[watch] dashboard updated: {project_dir / '.watch-cache' / 'dashboard.html'}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"[watch] dashboard update failed (non-fatal): {exc}", file=sys.stderr)
 
     return 0
 
