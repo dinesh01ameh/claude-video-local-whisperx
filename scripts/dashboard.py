@@ -702,8 +702,35 @@ HTML_TEMPLATE = r"""<!doctype html>
       font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       color: var(--text); white-space: pre-wrap; word-break: break-word;
     }
+    .job-log-tabs {
+      display: none; gap: 0; margin-bottom: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .job-log-tabs.show { display: flex; }
+    .job-log-tabs .tab {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 6px 14px; font: 11px inherit; font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid transparent; margin-bottom: -1px;
+    }
+    .job-log-tabs .tab:hover { color: var(--text); }
+    .job-log-tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
     .job-actions { display: none; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .job-actions.show { display: flex; }
+
+    /* Auto-synthesize toggle in marker modal foot */
+    .auto-synth-toggle {
+      display: none; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--muted); cursor: pointer; user-select: none;
+      margin-right: 6px;
+    }
+    .auto-synth-toggle.show { display: inline-flex; }
+    .auto-synth-toggle input[type=checkbox] {
+      width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent);
+    }
+    .auto-synth-toggle input[type=checkbox]:disabled { cursor: not-allowed; opacity: 0.5; }
+    .auto-synth-toggle.disabled { color: var(--border); cursor: not-allowed; }
     .job-actions button {
       background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
       padding: 7px 14px; border-radius: 4px; font: 12px inherit; cursor: pointer;
@@ -945,7 +972,11 @@ HTML_TEMPLATE = r"""<!doctype html>
 
       <div class="modal-foot">
         <span class="estimate" id="marker-estimate">No segments yet</span>
-        <button id="marker-copy" class="primary" disabled>Copy /watch --focused command</button>
+        <label class="auto-synth-toggle" id="auto-synth-toggle" title="Auto-synthesize via Claude Code after extraction">
+          <input type="checkbox" id="auto-synth-checkbox" checked>
+          <span>Auto-synthesize</span>
+        </label>
+        <button id="marker-copy" class="primary">Copy /watch --focused command</button>
       </div>
     </div>
   </div>
@@ -996,10 +1027,16 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="modal-body">
         <p class="job-detail" id="job-detail"></p>
+        <div class="job-log-tabs" id="job-log-tabs">
+          <button class="tab active" data-channel="extract">Extract</button>
+          <button class="tab" data-channel="synthesis">Synthesis</button>
+        </div>
         <pre class="job-log" id="job-log"></pre>
         <div class="job-actions" id="job-actions">
-          <button id="job-copy-prompt" class="primary">Copy prompt for Claude Code</button>
+          <button id="job-copy-prompt">Copy prompt for Claude Code</button>
           <button id="job-show-report">View focused report</button>
+          <button id="job-open-result" class="primary">Open Result</button>
+          <button id="job-open-nlm">Open NLM</button>
         </div>
       </div>
     </div>
@@ -2012,10 +2049,17 @@ HTML_TEMPLATE = r"""<!doctype html>
           return out;
         });
         const review = (draft.review || "").replace(/[\r\n]+/g, " ").trim();
+        const autoSynthCheckbox = document.getElementById("auto-synth-checkbox");
+        const autoSynthesize = !!(claudeState.available && autoSynthCheckbox && autoSynthCheckbox.checked);
         fetch("/api/focused", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ work_dir: rec.work_dir, segments, user_review: review }),
+          body: JSON.stringify({
+            work_dir: rec.work_dir,
+            segments,
+            user_review: review,
+            auto_synthesize: autoSynthesize,
+          }),
         }).then(r => {
           if (!r.ok) return r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); });
           return r.json();
@@ -2023,9 +2067,11 @@ HTML_TEMPLATE = r"""<!doctype html>
           closeMarker();
           openJobModal(
             data.job_id,
-            "Focused extraction",
-            "Extracting marked frames and filtering transcript…",
-            { focused_report_path: data.focused_report_path, rec_id: rec.id }
+            autoSynthesize ? "Focused extraction + synthesis" : "Focused extraction",
+            autoSynthesize
+              ? "Phase 1/2 starting — extraction; phase 2/2 chains Claude Code synthesis."
+              : "Extracting marked frames and filtering transcript…",
+            { focused_report_path: data.focused_report_path, rec_id: rec.id, auto_synthesize: autoSynthesize }
           );
         }).catch(err => {
           showToast("Server rejected focused job: " + err.message);
@@ -2286,16 +2332,28 @@ HTML_TEMPLATE = r"""<!doctype html>
     let jobPollHandle = null;
     let currentJobId = null;
     let currentJobMeta = null;
+    let activeLogChannel = "extract";        // which tab the job-modal renders
+    let autoSwitchedToSynthesis = false;     // one-shot per-job flag
+    let jobAutoCloseHandle = null;
+    const claudeState = { available: false, path: null };
 
     function openJobModal(jobId, title, detail, meta) {
       currentJobId = jobId;
       currentJobMeta = meta || null;
+      activeLogChannel = "extract";
+      autoSwitchedToSynthesis = false;
+      if (jobAutoCloseHandle) { clearTimeout(jobAutoCloseHandle); jobAutoCloseHandle = null; }
+
       document.getElementById("job-modal-title").textContent = title;
       document.getElementById("job-detail").textContent = detail || "";
       const status = document.getElementById("job-status");
       status.textContent = "queued";
       status.className = "job-status queued";
       document.getElementById("job-log").textContent = "";
+      document.getElementById("job-log-tabs").classList.remove("show");
+      document.querySelectorAll("#job-log-tabs .tab").forEach(t => {
+        t.classList.toggle("active", t.dataset.channel === "extract");
+      });
       document.getElementById("job-actions").classList.remove("show");
       document.getElementById("job-cancel").style.display = "inline-block";
       document.getElementById("job-modal-bg").classList.add("show");
@@ -2307,6 +2365,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function closeJobModal() {
       stopJobPoll();
+      if (jobAutoCloseHandle) { clearTimeout(jobAutoCloseHandle); jobAutoCloseHandle = null; }
       currentJobId = null;
       currentJobMeta = null;
       document.getElementById("job-modal-bg").classList.remove("show");
@@ -2314,6 +2373,28 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function stopJobPoll() {
       if (jobPollHandle) { clearInterval(jobPollHandle); jobPollHandle = null; }
+    }
+
+    function setActiveLogChannel(channel, skipRender) {
+      activeLogChannel = channel;
+      document.querySelectorAll("#job-log-tabs .tab").forEach(t => {
+        t.classList.toggle("active", t.dataset.channel === channel);
+      });
+      if (!skipRender && currentJobId) pollJob(currentJobId);
+    }
+
+    function jobModalTitle(job) {
+      if (job.kind === "preview") {
+        if (job.status === "extracting" || job.status === "queued") return "Preview: extracting frames";
+        if (job.status === "done") return "Preview ready";
+        if (job.status === "failed") return "Preview failed";
+        return "Preview";
+      }
+      if (job.status === "extracting" || job.status === "queued") return "Phase 1/2: Extracting frames + transcript";
+      if (job.status === "synthesizing") return "Phase 2/2: Synthesizing via Claude Code";
+      if (job.status === "done") return "Done";
+      if (job.status === "failed") return "Failed";
+      return "Focused job";
     }
 
     function pollJob(jobId) {
@@ -2324,20 +2405,41 @@ HTML_TEMPLATE = r"""<!doctype html>
           const status = document.getElementById("job-status");
           status.textContent = job.status;
           status.className = "job-status " + job.status;
+          document.getElementById("job-modal-title").textContent = jobModalTitle(job);
+
+          // Show Extract/Synthesis tabs once the focused job has any synthesis state
+          const tabs = document.getElementById("job-log-tabs");
+          const hasSynthesis =
+            job.status === "synthesizing" ||
+            (job.synthesis_log_tail && job.synthesis_log_tail.length > 0) ||
+            (job.kind === "focused" && (job.status === "done" || job.status === "failed") && job.auto_synthesize);
+          tabs.classList.toggle("show", !!hasSynthesis);
+
+          // Auto-switch to synthesis tab the first time we see that phase
+          if (!autoSwitchedToSynthesis && job.status === "synthesizing") {
+            setActiveLogChannel("synthesis", true);
+            autoSwitchedToSynthesis = true;
+          }
+
+          // Render the active channel
           const log = document.getElementById("job-log");
+          const tail = activeLogChannel === "synthesis"
+            ? (job.synthesis_log_tail || [])
+            : (job.extract_log_tail || []);
           const wasAtBottom = (log.scrollTop + log.clientHeight) >= (log.scrollHeight - 4);
-          log.textContent = (job.log_tail || []).join("\n");
+          log.textContent = tail.join("\n");
           if (wasAtBottom) log.scrollTop = log.scrollHeight;
 
           if (job.status === "done") {
             stopJobPoll();
             document.getElementById("job-cancel").style.display = "none";
-            // Focused jobs: show the prompt-copy + view-report actions
-            if (currentJobMeta && currentJobMeta.focused_report_path) {
-              document.getElementById("job-actions").classList.add("show");
-            }
-            // Refresh manifest after a brief delay so the new/updated row appears
+            renderJobActions(job);
+            // Refresh manifest, then auto-close (so the row's own buttons take over)
             setTimeout(refreshManifest, 800);
+            if (jobAutoCloseHandle) clearTimeout(jobAutoCloseHandle);
+            jobAutoCloseHandle = setTimeout(() => {
+              if (currentJobId === jobId) closeJobModal();
+            }, 2500);
           } else if (job.status === "failed") {
             stopJobPoll();
             document.getElementById("job-cancel").style.display = "none";
@@ -2349,6 +2451,53 @@ HTML_TEMPLATE = r"""<!doctype html>
           const log = document.getElementById("job-log");
           log.textContent += "\n[poll error] " + err.message;
         });
+    }
+
+    function renderJobActions(job) {
+      const actions = document.getElementById("job-actions");
+      const result = job.result || {};
+      const recId = currentJobMeta && currentJobMeta.rec_id;
+      const synthesisDone = !!result.focused_result_path;
+
+      const copyPrompt = document.getElementById("job-copy-prompt");
+      const showReport = document.getElementById("job-show-report");
+      const openResult = document.getElementById("job-open-result");
+      const openNlm = document.getElementById("job-open-nlm");
+
+      // Extract-only (no auto-synthesis): paste-prompt is the right CTA.
+      // Auto-synthesized: Open Result / Open NLM are the right CTAs.
+      copyPrompt.style.display = (result.focused_report_path && !synthesisDone) ? "inline-block" : "none";
+      showReport.style.display = result.focused_report_path ? "inline-block" : "none";
+      openResult.style.display = (synthesisDone && recId) ? "inline-block" : "none";
+      openNlm.style.display = (synthesisDone && recId) ? "inline-block" : "none";
+
+      const anyVisible = [copyPrompt, showReport, openResult, openNlm]
+        .some(el => el.style.display === "inline-block");
+      actions.classList.toggle("show", anyVisible);
+    }
+
+    function updateClaudeUI() {
+      const toggle = document.getElementById("auto-synth-toggle");
+      const checkbox = document.getElementById("auto-synth-checkbox");
+      const btn = document.getElementById("marker-copy");
+      if (!SERVER_MODE) {
+        toggle.classList.remove("show");
+        if (btn) btn.textContent = "Copy /watch --focused command";
+        return;
+      }
+      toggle.classList.add("show");
+      if (claudeState.available) {
+        checkbox.disabled = false;
+        toggle.classList.remove("disabled");
+        toggle.title = `Claude CLI: ${claudeState.path}`;
+        if (btn) btn.textContent = checkbox.checked ? "Send to Claude (auto)" : "Send to Claude (extract only)";
+      } else {
+        checkbox.disabled = true;
+        checkbox.checked = false;
+        toggle.classList.add("disabled");
+        toggle.title = "Claude CLI not found on PATH — auto-synthesis disabled";
+        if (btn) btn.textContent = "Send to Claude (extract only)";
+      }
     }
 
     if (SERVER_MODE) {
@@ -2379,10 +2528,58 @@ HTML_TEMPLATE = r"""<!doctype html>
           .then(text => { document.getElementById("job-log").textContent = text; })
           .catch(err => showToast("Couldn't load focused report: " + err.message));
       });
+      document.getElementById("job-open-result").addEventListener("click", () => {
+        const recId = currentJobMeta && currentJobMeta.rec_id;
+        if (!recId) return;
+        closeJobModal();
+        refreshManifest();
+        setTimeout(() => {
+          const result = FOCUSED_RESULTS[recId];
+          const rec = RECORDS.find(r => r.id === recId);
+          if (!result) { showToast("Result not loaded yet — try the row's Result button"); return; }
+          document.getElementById("result-modal-title").textContent =
+            (rec && rec.title) ? `Result — ${rec.title}` : "Focused result";
+          document.getElementById("result-modal-body").textContent = result;
+          document.getElementById("result-modal-bg").classList.add("show");
+        }, 600);
+      });
+      document.getElementById("job-open-nlm").addEventListener("click", () => {
+        const recId = currentJobMeta && currentJobMeta.rec_id;
+        if (!recId) return;
+        closeJobModal();
+        refreshManifest();
+        setTimeout(() => {
+          const summary = SUMMARIES[recId];
+          const rec = RECORDS.find(r => r.id === recId);
+          if (!summary) { showToast("NLM summary not loaded yet — try the row's NLM button"); return; }
+          document.getElementById("nlm-modal-title").textContent = (rec && rec.title) || "NLM Summary";
+          document.getElementById("nlm-modal-body").textContent = summary;
+          document.getElementById("nlm-modal-bg").classList.add("show");
+        }, 600);
+      });
 
-      // In server mode, the marker-copy primary action sends to the server.
-      const copyBtn = document.getElementById("marker-copy");
-      if (copyBtn) copyBtn.textContent = "Send to Claude";
+      // Log-tab switching
+      document.querySelectorAll("#job-log-tabs .tab").forEach(t => {
+        t.addEventListener("click", () => setActiveLogChannel(t.dataset.channel));
+      });
+
+      // Auto-synth toggle reactivity
+      document.getElementById("auto-synth-checkbox").addEventListener("change", updateClaudeUI);
+
+      // Probe /api/health to learn whether the claude CLI is on the server's PATH.
+      fetch("/api/health")
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (data) {
+            claudeState.available = !!data.claude_available;
+            claudeState.path = data.claude_path;
+          }
+          updateClaudeUI();
+        })
+        .catch(() => updateClaudeUI());
+    } else {
+      // Static mode: keep the original button label.
+      updateClaudeUI();
     }
 
     function setConnIndicator(ok) {
