@@ -118,13 +118,13 @@ def main() -> int:
 
     if not transcript_segments and not args.no_whisper:
         backend, api_key = load_api_key(args.whisper)
-        if backend and api_key:
+        if backend:
             try:
                 all_segments, used_backend = transcribe_video(
                     video_path,
                     work / "audio.mp3",
                     backend=backend,
-                    api_key=api_key,
+                    api_key=api_key or None,
                 )
                 transcript_segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
                 transcript_text = format_transcript(transcript_segments)
