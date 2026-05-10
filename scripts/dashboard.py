@@ -32,6 +32,41 @@ PROJECT_TAGS = [
 ]
 
 
+def _rewrite_path(p: str, project_root: Path) -> str:
+    """Rewrite sandbox paths so they resolve on the host.
+
+    /watch runs from inside the Cowork sandbox record paths like
+    `/sessions/<sid>/mnt/<basename>/.watch-cache/...`. Those paths don't
+    exist on the host filesystem (Windows / Claude Code), so the dashboard's
+    `<img src="file://…">` tags 404 and `_load_previews` can't find preview.json.
+
+    Strip everything before `.watch-cache/` and prepend the host project root.
+    Already-host paths are left alone (the marker is still found, and
+    `project_root / .watch-cache / <tail>` is identical to the input).
+    """
+    if not p:
+        return p
+    for marker in ("/.watch-cache/", "\\.watch-cache\\"):
+        idx = p.find(marker)
+        if idx != -1:
+            tail = p[idx + len(marker):]
+            return str(project_root / ".watch-cache" / tail)
+    return p
+
+
+def _normalize_paths(records: list[dict], project_root: Path) -> list[dict]:
+    """Return records with sandbox paths rewritten to host paths."""
+    out = []
+    for rec in records:
+        new_rec = dict(rec)
+        for key in ("work_dir", "first_frame_path", "video_path"):
+            val = new_rec.get(key)
+            if val:
+                new_rec[key] = _rewrite_path(str(val), project_root)
+        out.append(new_rec)
+    return out
+
+
 def update_manifest(manifest_path: Path, record: dict[str, Any]) -> None:
     """Append `record` to the JSON list at `manifest_path`. Creates if missing."""
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +111,60 @@ def _load_summaries(records: list[dict]) -> dict[str, str]:
     return out
 
 
+def _load_focused_results(records: list[dict]) -> dict[str, str]:
+    """Load <work_dir>/focused-result.md for each record. Cap at 80 KB.
+
+    Mirror of _load_summaries; the marker workflow saves both nlm-summary.md
+    (NLM-paste version) and focused-result.md (long-form analysis), and the
+    dashboard surfaces them via separate modals.
+    """
+    out: dict[str, str] = {}
+    for rec in records:
+        rid = rec.get("id")
+        work = rec.get("work_dir")
+        if not rid or not work:
+            continue
+        result_path = Path(work) / "focused-result.md"
+        if not result_path.exists():
+            continue
+        try:
+            text = result_path.read_text(encoding="utf-8", errors="replace")
+            if len(text) > 80_000:
+                text = text[:80_000] + "\n\n…[truncated]"
+            out[rid] = text
+        except OSError:
+            continue
+    return out
+
+
+def _load_previews(records: list[dict]) -> dict[str, dict]:
+    """For preview-ready records, load <work_dir>/preview.json so the marker UI
+    can render the timeline strip and transcript without a network round-trip
+    (the dashboard is a self-contained file:// page).
+
+    Returns {record_id: preview_dict}. Only loads for records with
+    state == "preview-ready" — focused-ready / complete records don't need it.
+    """
+    out: dict[str, dict] = {}
+    for rec in records:
+        if rec.get("state") != "preview-ready":
+            continue
+        rid = rec.get("id")
+        work = rec.get("work_dir")
+        if not rid or not work:
+            continue
+        preview_path = Path(work) / "preview.json"
+        if not preview_path.exists():
+            continue
+        try:
+            data = json.loads(preview_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                out[rid] = data
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
 def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
     """Regenerate dashboard.html from the manifest + sibling nlm-summary.md files."""
     if manifest_path.exists():
@@ -89,19 +178,46 @@ def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
     if not isinstance(records, list):
         records = []
 
+    project_root = manifest_path.parent.parent  # <project>/.watch-cache/index.json → <project>
+    records = _normalize_paths(records, project_root)
     records = sorted(records, key=lambda r: r.get("started_at") or "", reverse=True)
     summaries = _load_summaries(records)
+    focused_results = _load_focused_results(records)
+    previews = _load_previews(records)
+    # preview.json content carries its own sandbox paths inside sparse_frames[*].path;
+    # rewrite them so the marker timeline's <img> tags resolve on the host.
+    previews = {
+        rid: {
+            **p,
+            "video_path": _rewrite_path(str(p.get("video_path", "")), project_root) if p.get("video_path") else p.get("video_path"),
+            "sparse_frames": [
+                {**f, "path": _rewrite_path(str(f.get("path", "")), project_root)} if f.get("path") else f
+                for f in p.get("sparse_frames", [])
+            ] if isinstance(p.get("sparse_frames"), list) else p.get("sparse_frames"),
+        }
+        for rid, p in previews.items()
+    }
+
+    # The marker modal needs to know where watch.py lives so it can build the
+    # `python <script> --focused ...` command users copy to clipboard.
+    script_path = (Path(__file__).parent.resolve() / "watch.py")
 
     data_json = json.dumps(records, ensure_ascii=False)
     summaries_json = json.dumps(summaries, ensure_ascii=False)
+    focused_results_json = json.dumps(focused_results, ensure_ascii=False)
+    previews_json = json.dumps(previews, ensure_ascii=False)
     tags_json = json.dumps(PROJECT_TAGS, ensure_ascii=False)
+    script_path_json = json.dumps(str(script_path), ensure_ascii=False)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     html = (
         HTML_TEMPLATE
         .replace("{{DATA}}", data_json)
         .replace("{{SUMMARIES}}", summaries_json)
+        .replace("{{FOCUSED_RESULTS}}", focused_results_json)
+        .replace("{{PREVIEWS}}", previews_json)
         .replace("{{PROJECT_TAGS}}", tags_json)
+        .replace("{{SCRIPT_PATH}}", script_path_json)
         .replace("{{GENERATED_AT}}", generated_at)
         .replace("{{COUNT}}", str(len(records)))
     )
@@ -131,6 +247,28 @@ HTML_TEMPLATE = r"""<!doctype html>
     .topbar { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 16px; }
     .topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
     .topbar .meta { color: var(--muted); font-size: 11px; }
+    .topbar .topbar-btn {
+      margin-left: auto; background: var(--bg); color: var(--muted);
+      border: 1px solid var(--border); padding: 5px 12px; border-radius: 4px;
+      font: 11px inherit; cursor: pointer;
+    }
+    .topbar .topbar-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+    .urlbar {
+      display: flex; gap: 8px; align-items: center;
+      padding: 10px 20px; border-bottom: 0.5px solid var(--border); background: var(--panel);
+    }
+    .urlbar input[type=url] {
+      flex: 1; min-width: 280px;
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 8px 12px; border-radius: 5px; font: 13px inherit;
+    }
+    .urlbar input[type=url]:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+    .urlbar button {
+      background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
+      padding: 8px 16px; border-radius: 5px; font: 13px inherit; cursor: pointer; font-weight: 500;
+    }
+    .urlbar button:hover { background: var(--accent); color: var(--bg); }
 
     .stats { display: flex; gap: 24px; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border); }
     .stats .stat { display: flex; flex-direction: column; gap: 2px; }
@@ -197,8 +335,15 @@ HTML_TEMPLATE = r"""<!doctype html>
     .badge.complete { color: var(--green); border-color: rgba(95, 184, 120, 0.3); }
     .badge.failed { color: var(--red); border-color: rgba(213, 107, 107, 0.3); }
     .badge.partial { color: var(--amber); border-color: rgba(213, 159, 79, 0.3); }
+    .badge.preview-ready { color: var(--amber); border-color: rgba(213, 159, 79, 0.5); background: rgba(213, 159, 79, 0.08); }
+    .badge.focused-ready { color: var(--accent); border-color: rgba(122, 166, 255, 0.4); background: rgba(122, 166, 255, 0.08); }
     .badge.pasted { color: var(--green); border-color: rgba(95, 184, 120, 0.3); background: rgba(95, 184, 120, 0.08); }
     .badge.pending { color: var(--amber); border-color: rgba(213, 159, 79, 0.3); }
+
+    .actions button.mark-cta {
+      color: var(--amber); font-weight: 600;
+    }
+    .actions button.mark-cta:hover { color: var(--text); text-decoration: underline; }
 
     .nlm-cell { text-align: center; }
     .nlm-cell input[type=checkbox] {
@@ -267,12 +412,299 @@ HTML_TEMPLATE = r"""<!doctype html>
     .imgmodal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 150; cursor: pointer; align-items: center; justify-content: center; }
     .imgmodal-bg.show { display: flex; }
     .imgmodal-bg img { max-width: 90vw; max-height: 90vh; border-radius: 4px; }
+
+    /* Marker modal — segment-marking UI for preview-ready records */
+    .marker-modal { max-width: 1280px; }
+    .marker-modal .modal-body { padding: 0; }
+
+    /* M/S toolbar between header and body grid */
+    .marker-toolbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--bg);
+    }
+    .marker-toolbar-label {
+      font-size: 10px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .marker-mtype {
+      width: 28px; height: 28px; padding: 0; border-radius: 4px;
+      font: 600 13px ui-monospace, monospace; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: background 80ms, color 80ms;
+    }
+    .marker-mtype.must {
+      background: transparent; color: var(--amber); border: 1.5px solid var(--amber);
+    }
+    .marker-mtype.must.active {
+      background: rgba(213, 159, 79, 0.2); box-shadow: 0 0 0 2px rgba(213, 159, 79, 0.25);
+    }
+    .marker-mtype.skip {
+      background: transparent; color: var(--red); border: 1.5px solid var(--red);
+    }
+    .marker-mtype.skip.active {
+      background: rgba(213, 107, 107, 0.2); box-shadow: 0 0 0 2px rgba(213, 107, 107, 0.25);
+    }
+    .marker-mtype:hover { filter: brightness(1.15); }
+    .marker-recording {
+      flex: 1; font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums;
+    }
+    .marker-recording.active.must { color: var(--amber); }
+    .marker-recording.active.skip { color: var(--red); }
+    .marker-cancel-active {
+      width: 22px; height: 22px; padding: 0; border-radius: 11px;
+      background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+      cursor: pointer; font: 14px inherit; line-height: 1;
+    }
+    .marker-cancel-active:hover { color: var(--red); border-color: var(--red); }
+    .marker-counts {
+      font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+    }
+
+    /* Two-column body grid */
+    .marker-body {
+      display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+      gap: 0; min-height: 0;
+    }
+    .marker-left, .marker-right {
+      display: flex; flex-direction: column; min-width: 0;
+      max-height: calc(90vh - 180px); overflow-y: auto;
+    }
+    .marker-right { border-left: 1px solid var(--border); }
+    @media (max-width: 900px) {
+      .marker-body { grid-template-columns: 1fr; }
+      .marker-right { border-left: none; border-top: 1px solid var(--border); }
+    }
+
+    /* Video player + custom timeline strip with region overlays */
+    .marker-video-wrap {
+      padding: 14px 18px 6px; border-bottom: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .marker-video-wrap video {
+      width: 100%; max-height: 360px; background: #000; border-radius: 4px; outline: none;
+    }
+    .marker-timeline {
+      position: relative; height: 18px; border: 1px solid var(--border);
+      border-radius: 3px; background: var(--bg); cursor: pointer; overflow: hidden;
+    }
+    .marker-timeline-regions { position: absolute; inset: 0; pointer-events: none; }
+    .marker-timeline-region {
+      position: absolute; top: 0; bottom: 0;
+      border-left: 1px solid currentColor; border-right: 1px solid currentColor;
+    }
+    .marker-timeline-region.must { background: rgba(213, 159, 79, 0.4); color: var(--amber); }
+    .marker-timeline-region.skip { background: rgba(213, 107, 107, 0.4); color: var(--red); }
+    .marker-timeline-region.active {
+      border-style: dashed; border-width: 1.5px;
+    }
+    .marker-timeline-playhead {
+      position: absolute; top: -2px; bottom: -2px; width: 2px;
+      background: var(--accent); pointer-events: none; left: 0;
+      box-shadow: 0 0 4px rgba(122, 166, 255, 0.6);
+    }
+
+    /* Sparse frame thumbs — tint backgrounds based on segment containment */
+    .marker-frame { background: var(--bg); }
+    .marker-frame.in-must { background: rgba(213, 159, 79, 0.15); border-color: rgba(213, 159, 79, 0.4); }
+    .marker-frame.in-skip { background: rgba(213, 107, 107, 0.15); border-color: rgba(213, 107, 107, 0.4); }
+    .marker-frame.in-active { border-style: dashed; }
+    .marker-frame.at-playhead { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* Manual entry drawer */
+    .marker-manual summary, .marker-transcript-drawer summary {
+      cursor: pointer; padding: 6px 0; font-size: 12px; color: var(--muted); user-select: none;
+    }
+    .marker-manual summary:hover, .marker-transcript-drawer summary:hover { color: var(--text); }
+    .marker-manual[open] .marker-controls { margin-top: 6px; }
+    .marker-section { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+    .marker-section:last-child { border-bottom: none; }
+    .marker-section h3 {
+      margin: 0 0 8px; font-size: 12px; font-weight: 500; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .marker-section label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .marker-context textarea {
+      width: 100%; min-height: 56px; max-height: 200px;
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 8px 10px; border-radius: 5px; font: 13px inherit; resize: vertical;
+    }
+    .marker-context textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+
+    .marker-frames {
+      display: flex; gap: 4px; overflow-x: auto; padding: 4px 0 8px;
+      scroll-snap-type: x proximity;
+    }
+    .marker-frame {
+      flex: 0 0 auto; width: 88px; cursor: pointer; text-align: center;
+      border: 2px solid transparent; border-radius: 4px; padding: 2px;
+      scroll-snap-align: start; transition: border-color 80ms;
+    }
+    .marker-frame img {
+      width: 84px; height: 56px; object-fit: cover; border-radius: 3px;
+      background: var(--panel); display: block;
+    }
+    .marker-frame .ts { font-size: 10px; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+    .marker-frame:hover { border-color: var(--accent-soft); }
+    .marker-frame.start { border-color: var(--green); }
+    .marker-frame.end { border-color: var(--red); }
+    .marker-frame.in-range { background: rgba(122, 166, 255, 0.06); }
+
+    .marker-controls {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    }
+    .marker-controls input[type=text] {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 6px 9px; border-radius: 4px; font: 12px inherit;
+    }
+    .marker-controls input.time { width: 80px; font-variant-numeric: tabular-nums; }
+    .marker-controls input.intent { flex: 1 1 240px; min-width: 200px; }
+    .marker-controls select {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 6px 9px; border-radius: 4px; font: 12px inherit;
+    }
+    .marker-controls button.add {
+      background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
+      padding: 6px 14px; border-radius: 4px; font: 12px inherit; cursor: pointer;
+    }
+    .marker-controls button.add:hover { background: var(--accent); color: var(--bg); }
+
+    .marker-segments-section h3 { display: flex; align-items: baseline; gap: 8px; }
+    .marker-coverage { margin-left: auto; font-size: 10px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: normal; }
+    .marker-segments-list { list-style: none; padding: 0; margin: 0; }
+    .marker-segments-list li {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      grid-template-areas: "badge range actions" "badge intent intent";
+      column-gap: 8px; row-gap: 2px;
+      padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px;
+      margin-bottom: 4px; font-size: 12px; background: var(--bg);
+    }
+    .marker-segments-list li.active { border-style: dashed; border-color: var(--accent); }
+    .marker-segments-list .seg-badge {
+      grid-area: badge;
+      width: 22px; height: 22px; border-radius: 4px;
+      display: inline-flex; align-items: center; justify-content: center;
+      font: 600 11px ui-monospace, monospace;
+    }
+    .marker-segments-list .seg-badge.must {
+      background: rgba(213, 159, 79, 0.15); color: var(--amber); border: 1px solid var(--amber);
+    }
+    .marker-segments-list .seg-badge.skip {
+      background: rgba(213, 107, 107, 0.15); color: var(--red); border: 1px solid var(--red);
+    }
+    .marker-segments-list li.active .seg-badge { border-style: dashed; }
+    .marker-segments-list .seg-range {
+      grid-area: range; display: flex; align-items: center; gap: 8px;
+      color: var(--text); font-variant-numeric: tabular-nums;
+    }
+    .marker-segments-list .seg-duration { color: var(--muted); font-size: 10px; }
+    .marker-segments-list .seg-intent {
+      grid-area: intent; color: var(--muted); word-break: break-word; font-size: 11px;
+    }
+    .marker-segments-list .seg-actions { grid-area: actions; display: flex; gap: 4px; }
+    .marker-segments-list button.icon {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 2px 6px; border-radius: 3px; cursor: pointer; font: 11px inherit; line-height: 1.2;
+    }
+    .marker-segments-list button.icon:hover { color: var(--accent); border-color: var(--accent); }
+    .marker-segments-list button.icon.del:hover { color: var(--red); border-color: var(--red); }
+    .marker-segments-list .seg-active-hint { color: var(--accent); font-size: 11px; font-style: italic; }
+    .marker-segments-list .seg-edit {
+      grid-column: 1 / -1; padding-top: 6px; display: flex; gap: 6px; flex-wrap: wrap;
+    }
+    .marker-segments-list .seg-edit input {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 4px 7px; border-radius: 3px; font: 11px inherit;
+    }
+    .marker-segments-list .seg-edit input.time { width: 70px; font-variant-numeric: tabular-nums; }
+    .marker-segments-list .seg-edit input.intent { flex: 1; min-width: 120px; }
+    .marker-segments-list .seg-edit button { font: 11px inherit; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
+    .marker-segments-list .seg-edit button.save { background: var(--accent); color: var(--bg); border: 1px solid var(--accent); }
+    .marker-segments-list .seg-edit button.cancel { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+    .marker-segments-list .seg-active-intent {
+      grid-area: intent; padding-top: 2px;
+    }
+    .marker-segments-list .seg-active-intent input {
+      width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 4px 7px; border-radius: 3px; font: 11px inherit;
+    }
+    .marker-segments-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 8px 0; }
+
+    .marker-transcript-drawer summary {
+      cursor: pointer; padding: 6px 0; font-size: 12px; color: var(--muted); user-select: none;
+    }
+    .marker-transcript-drawer summary:hover { color: var(--text); }
+    .marker-transcript-drawer .seg {
+      display: block; padding: 4px 8px; border-radius: 3px; cursor: pointer;
+      font-size: 12px; line-height: 1.45; margin-bottom: 2px;
+    }
+    .marker-transcript-drawer .seg:hover { background: var(--accent-soft); }
+    .marker-transcript-drawer .seg .ts {
+      color: var(--accent); font-family: ui-monospace, monospace; font-size: 11px; margin-right: 8px;
+    }
+
+    .modal-foot {
+      padding: 12px 18px; border-top: 1px solid var(--border);
+      display: flex; gap: 10px; justify-content: flex-end; align-items: center;
+    }
+    .modal-foot .estimate { color: var(--muted); font-size: 11px; margin-right: auto; }
+    .modal-foot button.primary {
+      background: var(--accent); color: var(--bg); border: none;
+      padding: 8px 16px; border-radius: 4px; font: 13px inherit; cursor: pointer; font-weight: 600;
+    }
+    .modal-foot button.primary:hover { filter: brightness(1.1); }
+    .modal-foot button.primary:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; filter: none; }
+    .modal-foot button.link {
+      background: none; border: none; color: var(--muted); font: 11px inherit;
+      cursor: pointer; padding: 0; text-decoration: underline; margin-right: auto;
+    }
+    .modal-foot button.link:hover { color: var(--red); }
+
+    /* Manage projects modal */
+    .projects-modal { max-width: 480px; }
+    .projects-help { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+    .projects-list { list-style: none; padding: 0; margin: 0 0 16px; }
+    .projects-list li {
+      display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+      border: 1px solid var(--border); border-radius: 4px; margin-bottom: 4px;
+      background: var(--bg); font-size: 13px;
+    }
+    .projects-list .proj-name { flex: 1; color: var(--text); }
+    .projects-list .proj-name.editing { padding: 0; }
+    .projects-list .proj-name input {
+      width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--accent);
+      padding: 4px 7px; border-radius: 3px; font: inherit;
+    }
+    .projects-list button.icon {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 3px 8px; border-radius: 3px; cursor: pointer; font: 11px inherit;
+    }
+    .projects-list button.icon:hover { color: var(--accent); border-color: var(--accent); }
+    .projects-list button.icon.del:hover { color: var(--red); border-color: var(--red); }
+    .projects-list .proj-locked { color: var(--muted); font-style: italic; font-size: 11px; }
+    .projects-add { display: flex; gap: 8px; }
+    .projects-add input {
+      flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 7px 10px; border-radius: 4px; font: 13px inherit;
+    }
+    .projects-add input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+    .projects-add button {
+      background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
+      padding: 7px 14px; border-radius: 4px; font: 13px inherit; cursor: pointer;
+    }
+    .projects-add button:hover { background: var(--accent); color: var(--bg); }
   </style>
 </head>
 <body>
   <div class="topbar">
     <h1>/watch dashboard</h1>
     <span class="meta">regenerated {{GENERATED_AT}}</span>
+    <button id="manage-projects-btn" class="topbar-btn" title="Add, rename, or delete project tags">Manage projects</button>
+  </div>
+
+  <div class="urlbar">
+    <input id="url-input" type="url" placeholder="Paste video URL — generates the /watch --preview command for you to paste in your terminal" autocomplete="off">
+    <button id="url-add-btn">+ Add video</button>
   </div>
 
   <div class="stats" id="stats"></div>
@@ -287,6 +719,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     </select>
     <select id="filter-status">
       <option value="">All statuses</option>
+      <option value="preview-ready">Preview-ready (needs marking)</option>
+      <option value="focused-ready">Focused-ready</option>
       <option value="complete">Complete</option>
       <option value="partial">Partial</option>
       <option value="failed">Failed</option>
@@ -341,14 +775,152 @@ HTML_TEMPLATE = r"""<!doctype html>
   <!-- Image preview modal -->
   <div class="imgmodal-bg" id="img-modal-bg"><img id="img-modal" alt=""></div>
 
+  <!-- Marker modal — segment marking for preview-ready records -->
+  <div class="modal-bg" id="marker-modal-bg">
+    <div class="modal marker-modal">
+      <div class="modal-head">
+        <h2 id="marker-title">Mark segments</h2>
+        <button id="marker-close">Close</button>
+      </div>
+
+      <div class="marker-toolbar">
+        <span class="marker-toolbar-label">DROP MARKER</span>
+        <button id="marker-m-btn" class="marker-mtype must" title="Must — process this segment (M)">M</button>
+        <button id="marker-s-btn" class="marker-mtype skip" title="Skip — exclude this segment (S)">S</button>
+        <span class="marker-recording" id="marker-recording"></span>
+        <button id="marker-cancel-active" class="marker-cancel-active" title="Discard the open segment" hidden>×</button>
+        <span class="marker-counts" id="marker-counts">No segments yet</span>
+      </div>
+
+      <div class="modal-body marker-body">
+        <div class="marker-left">
+          <div class="marker-video-wrap">
+            <video id="marker-video" controls preload="metadata"></video>
+            <div class="marker-timeline" id="marker-timeline" title="Click anywhere to seek">
+              <div class="marker-timeline-regions" id="marker-timeline-regions"></div>
+              <div class="marker-timeline-playhead" id="marker-timeline-playhead"></div>
+            </div>
+          </div>
+
+          <div class="marker-section">
+            <h3>Sparse frames</h3>
+            <div id="marker-frames" class="marker-frames"></div>
+          </div>
+
+          <div class="marker-section">
+            <details class="marker-manual">
+              <summary>Manual entry — set range with MM:SS</summary>
+              <div class="marker-controls">
+                <span>Range:</span>
+                <input id="marker-start" class="time" type="text" placeholder="MM:SS">
+                <span>→</span>
+                <input id="marker-end" class="time" type="text" placeholder="MM:SS">
+                <select id="marker-type">
+                  <option value="must">must (process)</option>
+                  <option value="skip">skip (exclude)</option>
+                </select>
+                <input id="marker-intent" class="intent" type="text" placeholder="intent (optional)">
+                <button id="marker-add" class="add">Add segment</button>
+              </div>
+            </details>
+          </div>
+
+          <div class="marker-section">
+            <details class="marker-transcript-drawer">
+              <summary>Transcript (click a line to seek the video)</summary>
+              <div id="marker-transcript"></div>
+            </details>
+          </div>
+        </div>
+
+        <div class="marker-right">
+          <div class="marker-section marker-segments-section">
+            <h3>
+              <span id="marker-segments-header">Segments</span>
+              <span class="marker-coverage" id="marker-coverage"></span>
+            </h3>
+            <ul id="marker-segments-list" class="marker-segments-list"></ul>
+          </div>
+
+          <div class="marker-section marker-context">
+            <label for="marker-review">User context (passed to Claude as <code>--user-review</code>)</label>
+            <textarea id="marker-review" placeholder="What are you trying to learn from this video? What pattern, claim, or moment matters?"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-foot">
+        <span class="estimate" id="marker-estimate">No segments yet</span>
+        <button id="marker-copy" class="primary" disabled>Copy /watch --focused command</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Result (focused-result.md) modal -->
+  <div class="modal-bg" id="result-modal-bg">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="result-modal-title">Focused result</h2>
+        <button id="result-copy">Copy</button>
+        <button id="result-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <pre id="result-modal-body"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manage projects modal -->
+  <div class="modal-bg" id="projects-modal-bg">
+    <div class="modal projects-modal">
+      <div class="modal-head">
+        <h2>Manage projects</h2>
+        <button id="projects-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="projects-help">Project tags shown in the <em>Project</em> column. Renaming or deleting updates every row tagged with that project.</p>
+        <ul id="projects-list" class="projects-list"></ul>
+        <div class="projects-add">
+          <input id="projects-add-input" type="text" placeholder="New project name (≤32 chars)" maxlength="32">
+          <button id="projects-add-btn">Add project</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button id="projects-reset" class="link">Reset to defaults</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
     const RECORDS = {{DATA}};
     const SUMMARIES = {{SUMMARIES}};
-    const PROJECT_TAGS = {{PROJECT_TAGS}};
+    const FOCUSED_RESULTS = {{FOCUSED_RESULTS}};
+    const PREVIEWS = {{PREVIEWS}};
+    const PROJECT_TAGS_SEED = {{PROJECT_TAGS}};
+    const SCRIPT_PATH = {{SCRIPT_PATH}};
     const STATE_KEY = "watch_dashboard_state";
     const UI_KEY = "watch_dashboard_ui";
+    const MARKERS_KEY = "watch_dashboard_markers";
+    const PROJECTS_KEY = "watch_dashboard_projects";
+
+    // Project tags: seeded from server-side PROJECT_TAGS_SEED on first load.
+    // After any edit, localStorage becomes the source of truth.
+    function loadProjects() {
+      try {
+        const raw = localStorage.getItem(PROJECTS_KEY);
+        if (!raw) return PROJECT_TAGS_SEED.slice();
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr) || arr.length === 0) return PROJECT_TAGS_SEED.slice();
+        return arr;
+      } catch { return PROJECT_TAGS_SEED.slice(); }
+    }
+    function saveProjects(arr) {
+      try { localStorage.setItem(PROJECTS_KEY, JSON.stringify(arr)); }
+      catch { showToast("Couldn't save projects: localStorage full?"); }
+    }
+    let PROJECT_TAGS = loadProjects();
 
     function loadState() {
       try { return JSON.parse(localStorage.getItem(STATE_KEY) || "{}"); }
@@ -365,9 +937,18 @@ HTML_TEMPLATE = r"""<!doctype html>
     function saveUI(ui) {
       try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {}
     }
+    function loadMarkers() {
+      try { return JSON.parse(localStorage.getItem(MARKERS_KEY) || "{}"); }
+      catch { return {}; }
+    }
+    function saveMarkers(m) {
+      try { localStorage.setItem(MARKERS_KEY, JSON.stringify(m)); }
+      catch (e) { showToast("Couldn't save markers: localStorage full?"); }
+    }
 
     let state = loadState();
     const ui = loadUI();
+    const markers = loadMarkers();
 
     function getAnnot(id) {
       return state[id] || { nlm_pasted: false, project_tag: "None", note: "" };
@@ -377,9 +958,58 @@ HTML_TEMPLATE = r"""<!doctype html>
       saveState(state);
     }
 
+    /** Unified record state — falls back to legacy `status` for older records. */
+    function effectiveState(r) {
+      return r.state || r.status || "complete";
+    }
+
+    /** Marker draft — segments + review + active in-progress segment. */
+    function newSegId() {
+      try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch {}
+      return "seg-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    }
+    function getMarker(id) {
+      const raw = markers[id] || { review: "", segments: [], active: null };
+      // Migrate legacy drafts: ensure each segment has an id, ensure `active` field exists.
+      const segments = (raw.segments || []).map(s => s.id ? s : { ...s, id: newSegId() });
+      return {
+        review: raw.review || "",
+        segments,
+        active: raw.active || null,
+      };
+    }
+    function setMarker(id, patch) {
+      markers[id] = { ...getMarker(id), ...patch };
+      saveMarkers(markers);
+    }
+
     function fmtDuration(seconds) {
       if (!seconds && seconds !== 0) return "—";
       const s = Math.round(seconds);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      if (h > 0) return `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+      return `${m}:${String(sec).padStart(2,"0")}`;
+    }
+
+    /** "MM:SS" or "HH:MM:SS" → milliseconds. Returns null if unparseable. */
+    function parseTimeToMs(str) {
+      if (!str) return null;
+      const parts = String(str).trim().split(":").map(p => p.trim());
+      if (parts.some(p => p === "" || isNaN(Number(p)))) return null;
+      const nums = parts.map(Number);
+      let s;
+      if (nums.length === 1) s = nums[0];
+      else if (nums.length === 2) s = nums[0] * 60 + nums[1];
+      else if (nums.length === 3) s = nums[0] * 3600 + nums[1] * 60 + nums[2];
+      else return null;
+      if (!isFinite(s) || s < 0) return null;
+      return Math.round(s * 1000);
+    }
+    function fmtMs(ms) {
+      if (ms == null || isNaN(ms)) return "—";
+      const s = Math.round(ms / 1000);
       const h = Math.floor(s / 3600);
       const m = Math.floor((s % 3600) / 60);
       const sec = s % 60;
@@ -483,7 +1113,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
       let rows = RECORDS.slice();
       if (filterTranscript) rows = rows.filter(r => (r.transcript_source || "none") === filterTranscript);
-      if (filterStatus) rows = rows.filter(r => (r.status || "complete") === filterStatus);
+      if (filterStatus) rows = rows.filter(r => effectiveState(r) === filterStatus);
       if (filterNlm) {
         rows = rows.filter(r => {
           const a = getAnnot(r.id);
@@ -541,12 +1171,29 @@ HTML_TEMPLATE = r"""<!doctype html>
           : escapeHtml(r.source || "");
         const tBadge = (r.transcript_source || "none");
         const tCount = r.transcript_segment_count != null ? ` · ${r.transcript_segment_count}` : "";
-        const status = r.status || "complete";
+        const status = effectiveState(r);
         const hasNlm = !!SUMMARIES[r.id];
+        const hasResult = !!FOCUSED_RESULTS[r.id];
+        const hasPreview = !!PREVIEWS[r.id];
+        const isMarkable = (status === "preview-ready" || status === "focused-ready") && hasPreview;
 
-        const projectOptions = PROJECT_TAGS.map(t =>
+        // Project dropdown — projects come from localStorage (with seed fallback).
+        // Always include the user's current tag even if it's been removed from the project list,
+        // so we don't silently flip their selection.
+        const tagsForRow = PROJECT_TAGS.slice();
+        if (a.project_tag && !tagsForRow.includes(a.project_tag)) tagsForRow.push(a.project_tag);
+        if (!tagsForRow.includes("None")) tagsForRow.unshift("None");
+        const projectOptions = tagsForRow.map(t =>
           `<option value="${escapeHtml(t)}" ${t === a.project_tag ? "selected" : ""}>${t === "None" ? "(none)" : escapeHtml(t)}</option>`
         ).join("");
+
+        // Action buttons: only render what's actionable. No more disabled "no NLM" / "no result" labels.
+        const actionParts = [];
+        if (workUri) actionParts.push(`<a href="${workUri}" title="Open work directory">work</a>`);
+        if (isMarkable) actionParts.push(`<button data-action="mark" class="mark-cta" title="Mark must/skip segments and generate the focused command">Mark</button>`);
+        if (hasResult) actionParts.push(`<button data-action="preview-result" title="Read the long-form focused result">Result</button>`);
+        if (hasNlm) actionParts.push(`<button data-action="preview-nlm" title="Preview the NLM-ready summary">NLM</button>`);
+        actionParts.push(`<button data-action="copy-rerun" title="Copy re-run command to clipboard">re-run</button>`);
 
         return `<tr data-id="${escapeHtml(r.id)}">
           <td><span class="age" title="${escapeHtml(r.started_at || "")}">${fmtAge(r.started_at)}</span></td>
@@ -570,11 +1217,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <td class="note-cell">
             <textarea data-action="note" placeholder="note…">${escapeHtml(a.note || "")}</textarea>
           </td>
-          <td class="actions">
-            ${workUri ? `<a href="${workUri}" title="Open work directory">work</a>` : ""}
-            <button data-action="preview-nlm" ${hasNlm ? "" : "disabled"} title="${hasNlm ? "Preview NLM summary" : "No NLM summary saved for this video"}">${hasNlm ? "NLM" : "no NLM"}</button>
-            <button data-action="copy-rerun" title="Copy re-run command to clipboard">re-run</button>
-          </td>
+          <td class="actions">${actionParts.join("")}</td>
         </tr>`;
       }).join("");
     }
@@ -609,6 +1252,10 @@ HTML_TEMPLATE = r"""<!doctype html>
         m.classList.add("show");
         return;
       }
+      if (action === "mark") {
+        openMarker(id);
+        return;
+      }
       if (action === "preview-nlm") {
         const summary = SUMMARIES[id];
         const rec = RECORDS.find(r => r.id === id);
@@ -618,10 +1265,19 @@ HTML_TEMPLATE = r"""<!doctype html>
         else body.innerHTML = '<span class="empty-msg">No NLM summary file found at &lt;work_dir&gt;/nlm-summary.md.</span>';
         body.dataset.id = id;
         document.getElementById("nlm-modal-bg").classList.add("show");
+      } else if (action === "preview-result") {
+        const result = FOCUSED_RESULTS[id];
+        const rec = RECORDS.find(r => r.id === id);
+        document.getElementById("result-modal-title").textContent = (rec && rec.title) ? `Result — ${rec.title}` : "Focused result";
+        const body = document.getElementById("result-modal-body");
+        if (result) body.textContent = result;
+        else body.innerHTML = '<span class="empty-msg">No focused-result.md found at &lt;work_dir&gt;.</span>';
+        body.dataset.id = id;
+        document.getElementById("result-modal-bg").classList.add("show");
       } else if (action === "copy-rerun") {
         const rec = RECORDS.find(r => r.id === id);
         if (!rec) return;
-        const cmd = `python "$env:USERPROFILE\\..\\Ai-work\\Triage\\Triage Knowledge System\\claude-video-local-whisperx\\scripts\\watch.py" "${rec.source}"`;
+        const cmd = `python "${SCRIPT_PATH}" "${rec.source}"`;
         navigator.clipboard.writeText(cmd).then(
           () => showToast("Re-run command copied"),
           () => showToast("Couldn't copy — check clipboard permissions")
@@ -641,8 +1297,533 @@ HTML_TEMPLATE = r"""<!doctype html>
         () => showToast("Couldn't copy — select manually")
       );
     });
+
+    document.getElementById("result-close").addEventListener("click", () => document.getElementById("result-modal-bg").classList.remove("show"));
+    document.getElementById("result-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "result-modal-bg") document.getElementById("result-modal-bg").classList.remove("show");
+    });
+    document.getElementById("result-copy").addEventListener("click", () => {
+      const text = document.getElementById("result-modal-body").textContent;
+      navigator.clipboard.writeText(text).then(
+        () => showToast("Focused result copied"),
+        () => showToast("Couldn't copy — select manually")
+      );
+    });
     document.getElementById("img-modal-bg").addEventListener("click", () => {
       document.getElementById("img-modal-bg").classList.remove("show");
+    });
+
+    // ── Marker modal ───────────────────────────────────────────────────────────
+    let markerCurrentId = null;       // record id whose preview is open
+    let markerVideo = null;           // <video id="marker-video"> ref
+    let markerPlayheadRaf = null;     // requestAnimationFrame id
+
+    function openMarker(id) {
+      const rec = RECORDS.find(r => r.id === id);
+      const preview = PREVIEWS[id];
+      if (!rec || !preview) {
+        showToast("No preview data for this record");
+        return;
+      }
+      markerCurrentId = id;
+      markerVideo = document.getElementById("marker-video");
+
+      document.getElementById("marker-title").textContent = `Mark segments — ${rec.title || rec.id}`;
+
+      const draft = getMarker(id);
+      document.getElementById("marker-review").value = draft.review || "";
+      document.getElementById("marker-start").value = "";
+      document.getElementById("marker-end").value = "";
+      document.getElementById("marker-intent").value = "";
+      document.getElementById("marker-type").value = "must";
+
+      // Wire video src (file:// — Chrome plays it fine in same-origin file context)
+      if (preview.video_path) {
+        markerVideo.src = fileUri(preview.video_path);
+        markerVideo.style.display = "block";
+      } else {
+        markerVideo.removeAttribute("src");
+        markerVideo.style.display = "none";
+      }
+
+      renderMarkerFrames(preview);
+      renderMarkerTranscript(preview);
+      renderMarkerSegments();
+      startPlayheadLoop();
+
+      document.getElementById("marker-modal-bg").classList.add("show");
+    }
+
+    function closeMarker() {
+      document.getElementById("marker-modal-bg").classList.remove("show");
+      if (markerVideo) { try { markerVideo.pause(); } catch {} }
+      stopPlayheadLoop();
+      markerCurrentId = null;
+    }
+
+    function durationMs() {
+      const preview = markerCurrentId ? PREVIEWS[markerCurrentId] : null;
+      return (preview && preview.duration_ms) || 0;
+    }
+    function currentMs() {
+      if (markerVideo && isFinite(markerVideo.currentTime)) {
+        return Math.round(markerVideo.currentTime * 1000);
+      }
+      return 0;
+    }
+    function startPlayheadLoop() {
+      function tick() {
+        if (!markerCurrentId) return;
+        renderMarkerPlayhead();
+        refreshFramePlayhead();
+        markerPlayheadRaf = requestAnimationFrame(tick);
+      }
+      stopPlayheadLoop();
+      markerPlayheadRaf = requestAnimationFrame(tick);
+    }
+    function stopPlayheadLoop() {
+      if (markerPlayheadRaf != null) cancelAnimationFrame(markerPlayheadRaf);
+      markerPlayheadRaf = null;
+    }
+
+    function renderMarkerFrames(preview) {
+      const container = document.getElementById("marker-frames");
+      const frames = preview.sparse_frames || [];
+      if (frames.length === 0) {
+        container.innerHTML = '<span class="marker-segments-empty">No frames in preview.</span>';
+        return;
+      }
+      container.innerHTML = frames.map(f => {
+        const uri = fileUri(f.path);
+        return `<div class="marker-frame" data-pts="${f.pts_ms}">
+          <img src="${uri}" alt="frame at ${fmtMs(f.pts_ms)}">
+          <div class="ts">${fmtMs(f.pts_ms)}</div>
+        </div>`;
+      }).join("");
+      refreshFrameTints();
+    }
+
+    /** Tint each sparse frame based on which segment contains its pts_ms. */
+    function refreshFrameTints() {
+      if (!markerCurrentId) return;
+      const draft = getMarker(markerCurrentId);
+      const segments = draft.segments || [];
+      const active = draft.active;
+      document.querySelectorAll("#marker-frames .marker-frame").forEach(el => {
+        const pts = Number(el.dataset.pts);
+        el.classList.remove("in-must", "in-skip", "in-active");
+        for (const s of segments) {
+          if (pts >= s.start_ms && pts <= s.end_ms) {
+            el.classList.add(s.type === "must" ? "in-must" : "in-skip");
+            break;
+          }
+        }
+        if (active) {
+          const endProvisional = Math.max(active.start_ms, currentMs());
+          if (pts >= active.start_ms && pts <= endProvisional) {
+            el.classList.add(active.type === "must" ? "in-must" : "in-skip");
+            el.classList.add("in-active");
+          }
+        }
+      });
+    }
+
+    function refreshFramePlayhead() {
+      const cur = currentMs();
+      let nearest = null;
+      document.querySelectorAll("#marker-frames .marker-frame").forEach(el => {
+        el.classList.remove("at-playhead");
+        const pts = Number(el.dataset.pts);
+        if (pts <= cur && (!nearest || pts > Number(nearest.dataset.pts))) nearest = el;
+      });
+      if (nearest) nearest.classList.add("at-playhead");
+    }
+
+    function renderMarkerTimelineRegions() {
+      const cont = document.getElementById("marker-timeline-regions");
+      const dur = durationMs();
+      if (!dur || !markerCurrentId) { cont.innerHTML = ""; return; }
+      const draft = getMarker(markerCurrentId);
+      const segs = (draft.segments || []).slice();
+      const html = segs.map(s => {
+        const left = (s.start_ms / dur) * 100;
+        const width = ((s.end_ms - s.start_ms) / dur) * 100;
+        const tip = `${s.type} ${fmtMs(s.start_ms)}–${fmtMs(s.end_ms)}${s.intent ? ' · ' + s.intent : ''}`;
+        return `<div class="marker-timeline-region ${s.type}" style="left:${left}%;width:${width}%" title="${escapeHtml(tip)}"></div>`;
+      });
+      if (draft.active) {
+        const left = (draft.active.start_ms / dur) * 100;
+        const cur = Math.max(draft.active.start_ms, currentMs());
+        const width = ((cur - draft.active.start_ms) / dur) * 100;
+        html.push(`<div class="marker-timeline-region ${draft.active.type} active" style="left:${left}%;width:${width}%"></div>`);
+      }
+      cont.innerHTML = html.join("");
+    }
+
+    function renderMarkerPlayhead() {
+      const head = document.getElementById("marker-timeline-playhead");
+      const dur = durationMs();
+      if (!dur) { head.style.display = "none"; return; }
+      head.style.display = "block";
+      const pct = Math.max(0, Math.min(100, (currentMs() / dur) * 100));
+      head.style.left = `calc(${pct}% - 1px)`;
+      // While an active segment is open, its visible band must keep growing with the playhead.
+      if (markerCurrentId) {
+        const draft = getMarker(markerCurrentId);
+        if (draft.active) renderMarkerTimelineRegions();
+      }
+    }
+
+    function renderMarkerTranscript(preview) {
+      const container = document.getElementById("marker-transcript");
+      const segs = preview.transcript_segments || [];
+      if (segs.length === 0) {
+        container.innerHTML = '<span class="marker-segments-empty">No transcript in preview.</span>';
+        return;
+      }
+      container.innerHTML = segs.map(s =>
+        `<span class="seg" data-start="${s.start_ms}" data-end="${s.end_ms}">
+           <span class="ts">${fmtMs(s.start_ms)}</span>${escapeHtml(s.text || "")}
+         </span>`
+      ).join("");
+    }
+
+    function renderClosedSegmentRow(s) {
+      const dur = Math.max(0, (s.end_ms - s.start_ms) / 1000);
+      return `<li data-seg-id="${escapeHtml(s.id)}">
+        <span class="seg-badge ${s.type}">${s.type === "must" ? "M" : "S"}</span>
+        <span class="seg-range">
+          <span>${fmtMs(s.start_ms)} → ${fmtMs(s.end_ms)}</span>
+          <span class="seg-duration">${dur.toFixed(1)}s</span>
+        </span>
+        <span class="seg-actions">
+          <button class="icon" data-action="seg-edit" title="Edit">edit</button>
+          <button class="icon del" data-action="seg-del" title="Delete">del</button>
+        </span>
+        <span class="seg-intent">${escapeHtml(s.intent || "—")}</span>
+      </li>`;
+    }
+
+    function renderActiveSegmentRow(active) {
+      return `<li class="active" data-active="1">
+        <span class="seg-badge ${active.type}">${active.type === "must" ? "M" : "S"}</span>
+        <span class="seg-range">
+          <span>${fmtMs(active.start_ms)} → …</span>
+          <span class="seg-active-hint">click ${active.type === "must" ? "M" : "S"} again to close</span>
+        </span>
+        <span class="seg-actions">
+          <button class="icon del" data-action="active-cancel" title="Discard">×</button>
+        </span>
+        <span class="seg-active-intent">
+          <input type="text" data-action="active-intent" placeholder="intent (optional)" value="${escapeHtml(active.intent || '')}">
+        </span>
+      </li>`;
+    }
+
+    function renderMarkerSegments() {
+      if (!markerCurrentId) return;
+      const draft = getMarker(markerCurrentId);
+      const segs = (draft.segments || []).slice().sort((a, b) => a.start_ms - b.start_ms);
+      const ul = document.getElementById("marker-segments-list");
+      const header = document.getElementById("marker-segments-header");
+      const coverage = document.getElementById("marker-coverage");
+
+      header.textContent = `Segments (${segs.length})`;
+      const dur = durationMs();
+      if (dur > 0 && segs.length > 0) {
+        const mustMs = segs.filter(s => s.type === "must").reduce((a, s) => a + (s.end_ms - s.start_ms), 0);
+        const skipMs = segs.filter(s => s.type === "skip").reduce((a, s) => a + (s.end_ms - s.start_ms), 0);
+        coverage.textContent = `${Math.round((mustMs/dur)*100)}% must · ${Math.round((skipMs/dur)*100)}% skip`;
+      } else {
+        coverage.textContent = "";
+      }
+
+      if (segs.length === 0 && !draft.active) {
+        ul.innerHTML = '<li class="marker-segments-empty">No segments yet — press M to start a must segment, or S for skip.</li>';
+      } else {
+        const closed = segs.map(renderClosedSegmentRow).join("");
+        const activeRow = draft.active ? renderActiveSegmentRow(draft.active) : "";
+        ul.innerHTML = closed + activeRow;
+      }
+
+      updateMarkerToolbar();
+      updateMarkerEstimate();
+      renderMarkerTimelineRegions();
+      refreshFrameTints();
+    }
+
+    function updateMarkerToolbar() {
+      if (!markerCurrentId) return;
+      const draft = getMarker(markerCurrentId);
+      const mBtn = document.getElementById("marker-m-btn");
+      const sBtn = document.getElementById("marker-s-btn");
+      const rec = document.getElementById("marker-recording");
+      const cancel = document.getElementById("marker-cancel-active");
+      const counts = document.getElementById("marker-counts");
+
+      mBtn.classList.remove("active");
+      sBtn.classList.remove("active");
+      rec.classList.remove("active", "must", "skip");
+
+      if (draft.active) {
+        if (draft.active.type === "must") mBtn.classList.add("active");
+        else sBtn.classList.add("active");
+        rec.classList.add("active", draft.active.type);
+        const lbl = draft.active.type === "must" ? "M" : "S";
+        rec.textContent = `recording ${lbl} from ${fmtMs(draft.active.start_ms)} — press ${lbl} again to close`;
+        cancel.hidden = false;
+      } else {
+        rec.textContent = "Press M to mark a must segment, S for skip";
+        cancel.hidden = true;
+      }
+
+      const segs = draft.segments || [];
+      counts.textContent = `${segs.filter(s => s.type === "must").length} must · ${segs.filter(s => s.type === "skip").length} skip`;
+    }
+
+    function updateMarkerEstimate() {
+      const btn = document.getElementById("marker-copy");
+      const est = document.getElementById("marker-estimate");
+      const draft = getMarker(markerCurrentId);
+      const segs = (draft.segments || []);
+      const must = segs.filter(s => s.type === "must");
+      const skip = segs.filter(s => s.type === "skip");
+
+      const preview = PREVIEWS[markerCurrentId];
+      let mustSec = must.reduce((a, s) => a + Math.max(0, (s.end_ms - s.start_ms) / 1000), 0);
+      if (mustSec === 0 && skip.length > 0 && preview) {
+        const total = (preview.duration_ms || 0) / 1000;
+        const skipped = skip.reduce((a, s) => a + Math.max(0, (s.end_ms - s.start_ms) / 1000), 0);
+        mustSec = Math.max(0, total - skipped);
+      }
+      const frameCount = Math.min(60 * Math.max(1, must.length || 1), Math.max(0, Math.round(mustSec * 2)));
+      const transcriptText = (preview && preview.transcript_segments || [])
+        .filter(s => must.some(m => s.end_ms >= m.start_ms && s.start_ms <= m.end_ms) ||
+                     (must.length === 0 && skip.length > 0 &&
+                      !skip.some(k => s.end_ms >= k.start_ms && s.start_ms <= k.end_ms)))
+        .map(s => s.text || "").join(" ");
+      const wordCount = transcriptText.split(/\s+/).filter(Boolean).length;
+      const tokens = Math.round(frameCount * 800 + wordCount * 1.3);
+
+      if (segs.length === 0) {
+        est.textContent = "No segments yet";
+        btn.disabled = true;
+      } else {
+        est.textContent = `${must.length} must, ${skip.length} skip · ~${frameCount} frames · ~${tokens.toLocaleString()} tokens`;
+        btn.disabled = false;
+      }
+    }
+
+    /** Build the focused-mode command for clipboard paste. */
+    function buildFocusedCommand(rec) {
+      const draft = getMarker(rec.id);
+      const review = (draft.review || "").replace(/[\r\n]+/g, " ").replace(/"/g, '""').trim();
+      const segments = (draft.segments || []).map(s => ({
+        start_ms: s.start_ms,
+        end_ms: s.end_ms,
+        type: s.type,
+        ...(s.intent ? { intent: s.intent } : {}),
+      }));
+      const segmentsJson = JSON.stringify(segments).replace(/'/g, "'\\''");
+      return `python "${SCRIPT_PATH}" --focused --work-dir "${rec.work_dir}" --segments-json '${segmentsJson}' --user-review "${review}"`;
+    }
+
+    document.getElementById("marker-close").addEventListener("click", closeMarker);
+    document.getElementById("marker-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "marker-modal-bg") closeMarker();
+    });
+
+    /** M/S core: toggle the active segment of the given type. */
+    function dropMarker(type) {
+      if (!markerCurrentId) return;
+      const draft = getMarker(markerCurrentId);
+      const cur = currentMs();
+      if (draft.active) {
+        if (draft.active.type !== type) {
+          showToast(`Close the open ${draft.active.type} segment first (or click cancel ×)`);
+          return;
+        }
+        const startMs = draft.active.start_ms;
+        const endMs = cur;
+        if (endMs <= startMs) {
+          showToast("End must be after start — let the video play forward, then drop again");
+          return;
+        }
+        const intent = (draft.active.intent || "").trim();
+        const newSeg = { id: newSegId(), type, start_ms: startMs, end_ms: endMs, ...(intent ? { intent } : {}) };
+        const segments = (draft.segments || []).concat([newSeg]).sort((a, b) => a.start_ms - b.start_ms);
+        setMarker(markerCurrentId, { segments, active: null });
+      } else {
+        setMarker(markerCurrentId, { active: { type, start_ms: cur, intent: "" } });
+      }
+      renderMarkerSegments();
+    }
+
+    document.getElementById("marker-m-btn").addEventListener("click", () => dropMarker("must"));
+    document.getElementById("marker-s-btn").addEventListener("click", () => dropMarker("skip"));
+    document.getElementById("marker-cancel-active").addEventListener("click", () => {
+      if (!markerCurrentId) return;
+      setMarker(markerCurrentId, { active: null });
+      renderMarkerSegments();
+    });
+
+    // Active intent typing → persist
+    document.getElementById("marker-segments-list").addEventListener("input", e => {
+      if (!markerCurrentId) return;
+      if (e.target.dataset.action === "active-intent") {
+        const draft = getMarker(markerCurrentId);
+        if (!draft.active) return;
+        setMarker(markerCurrentId, { active: { ...draft.active, intent: e.target.value } });
+      }
+    });
+
+    // Segment edit / delete / cancel-active
+    document.getElementById("marker-segments-list").addEventListener("click", e => {
+      if (!markerCurrentId) return;
+      const li = e.target.closest("li");
+      if (!li) return;
+      const action = e.target.dataset.action;
+      const segId = li.dataset.segId;
+
+      if (action === "active-cancel") {
+        setMarker(markerCurrentId, { active: null });
+        renderMarkerSegments();
+        return;
+      }
+      if (action === "seg-del") {
+        if (!confirm("Delete this segment?")) return;
+        const draft = getMarker(markerCurrentId);
+        const segments = (draft.segments || []).filter(s => s.id !== segId);
+        setMarker(markerCurrentId, { segments });
+        renderMarkerSegments();
+        return;
+      }
+      if (action === "seg-edit") { openSegmentEditor(li, segId); return; }
+      if (action === "seg-edit-save") { saveSegmentEditor(li, segId); return; }
+      if (action === "seg-edit-cancel") { renderMarkerSegments(); return; }
+    });
+
+    function openSegmentEditor(li, segId) {
+      const draft = getMarker(markerCurrentId);
+      const seg = (draft.segments || []).find(s => s.id === segId);
+      if (!seg) return;
+      li.innerHTML = `
+        <span class="seg-badge ${seg.type}">${seg.type === "must" ? "M" : "S"}</span>
+        <div class="seg-edit">
+          <input class="time" type="text" data-action="edit-start" value="${escapeHtml(fmtMs(seg.start_ms))}">
+          <span>→</span>
+          <input class="time" type="text" data-action="edit-end" value="${escapeHtml(fmtMs(seg.end_ms))}">
+          <select data-action="edit-type">
+            <option value="must" ${seg.type === "must" ? "selected" : ""}>must</option>
+            <option value="skip" ${seg.type === "skip" ? "selected" : ""}>skip</option>
+          </select>
+          <input class="intent" type="text" data-action="edit-intent" value="${escapeHtml(seg.intent || '')}" placeholder="intent">
+          <button class="save" data-action="seg-edit-save">Save</button>
+          <button class="cancel" data-action="seg-edit-cancel">Cancel</button>
+        </div>
+      `;
+    }
+
+    function saveSegmentEditor(li, segId) {
+      const draft = getMarker(markerCurrentId);
+      const startMs = parseTimeToMs(li.querySelector('input[data-action="edit-start"]').value);
+      const endMs = parseTimeToMs(li.querySelector('input[data-action="edit-end"]').value);
+      const type = li.querySelector('select[data-action="edit-type"]').value;
+      const intent = li.querySelector('input[data-action="edit-intent"]').value.trim();
+      if (startMs == null || endMs == null) { showToast("Invalid time — use MM:SS or HH:MM:SS"); return; }
+      if (endMs <= startMs) { showToast("End must be after start"); return; }
+      const segments = (draft.segments || []).map(s => {
+        if (s.id !== segId) return s;
+        const next = { id: s.id, type, start_ms: startMs, end_ms: endMs };
+        if (intent) next.intent = intent;
+        return next;
+      });
+      setMarker(markerCurrentId, { segments });
+      renderMarkerSegments();
+    }
+
+    // Timeline click — seek
+    document.getElementById("marker-timeline").addEventListener("click", e => {
+      const dur = durationMs();
+      if (!dur || !markerVideo) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      markerVideo.currentTime = Math.max(0, Math.min(dur, pct * dur)) / 1000;
+      renderMarkerPlayhead();
+      refreshFramePlayhead();
+    });
+
+    // Frame click — seek
+    document.getElementById("marker-frames").addEventListener("click", e => {
+      const cell = e.target.closest(".marker-frame");
+      if (!cell || !markerVideo) return;
+      const pts = Number(cell.dataset.pts);
+      if (!isFinite(pts)) return;
+      markerVideo.currentTime = pts / 1000;
+      renderMarkerPlayhead();
+      refreshFramePlayhead();
+    });
+
+    // Transcript line click — seek
+    document.getElementById("marker-transcript").addEventListener("click", e => {
+      const seg = e.target.closest(".seg");
+      if (!seg || !markerVideo) return;
+      markerVideo.currentTime = Number(seg.dataset.start) / 1000;
+      renderMarkerPlayhead();
+      refreshFramePlayhead();
+    });
+
+    // Manual time inputs (secondary affordance)
+    document.getElementById("marker-start").addEventListener("change", e => {
+      const ms = parseTimeToMs(e.target.value);
+      if (ms == null && e.target.value.trim()) showToast("Invalid time — use MM:SS or HH:MM:SS");
+    });
+    document.getElementById("marker-end").addEventListener("change", e => {
+      const ms = parseTimeToMs(e.target.value);
+      if (ms == null && e.target.value.trim()) showToast("Invalid time — use MM:SS or HH:MM:SS");
+    });
+
+    // Review textarea — persist on input
+    document.getElementById("marker-review").addEventListener("input", e => {
+      if (!markerCurrentId) return;
+      setMarker(markerCurrentId, { review: e.target.value });
+    });
+
+    // Manual add segment (kept as secondary affordance)
+    document.getElementById("marker-add").addEventListener("click", () => {
+      if (!markerCurrentId) return;
+      const startMs = parseTimeToMs(document.getElementById("marker-start").value);
+      const endMs = parseTimeToMs(document.getElementById("marker-end").value);
+      if (startMs == null || endMs == null) { showToast("Set both start and end times"); return; }
+      if (endMs <= startMs) { showToast("End must be after start"); return; }
+      const type = document.getElementById("marker-type").value;
+      const intent = document.getElementById("marker-intent").value.trim();
+      const draft = getMarker(markerCurrentId);
+      const segments = (draft.segments || []).concat([
+        { id: newSegId(), start_ms: startMs, end_ms: endMs, type, ...(intent ? { intent } : {}) }
+      ]).sort((a, b) => a.start_ms - b.start_ms);
+      setMarker(markerCurrentId, { segments });
+      document.getElementById("marker-start").value = "";
+      document.getElementById("marker-end").value = "";
+      document.getElementById("marker-intent").value = "";
+      renderMarkerSegments();
+    });
+
+    // Copy /watch --focused command
+    document.getElementById("marker-copy").addEventListener("click", () => {
+      if (!markerCurrentId) return;
+      const rec = RECORDS.find(r => r.id === markerCurrentId);
+      if (!rec) return;
+      const draft = getMarker(markerCurrentId);
+      if (!draft.segments || draft.segments.length === 0) {
+        showToast("Add at least one segment first");
+        return;
+      }
+      const cmd = buildFocusedCommand(rec);
+      navigator.clipboard.writeText(cmd).then(
+        () => showToast("Focused command copied — paste into Claude Code to process"),
+        () => showToast("Couldn't copy — check clipboard permissions")
+      );
     });
 
     // Filter wiring + persistence
@@ -686,6 +1867,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     // Keyboard
     document.addEventListener("keydown", e => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+      const markerOpen = document.getElementById("marker-modal-bg").classList.contains("show");
+      if (markerOpen && (e.key === "m" || e.key === "M")) {
+        e.preventDefault(); dropMarker("must"); return;
+      }
+      if (markerOpen && (e.key === "s" || e.key === "S")) {
+        e.preventDefault(); dropMarker("skip"); return;
+      }
       if (e.key === "/") {
         e.preventDefault();
         document.getElementById("q").focus();
@@ -693,7 +1881,173 @@ HTML_TEMPLATE = r"""<!doctype html>
       } else if (e.key === "Escape") {
         document.getElementById("nlm-modal-bg").classList.remove("show");
         document.getElementById("img-modal-bg").classList.remove("show");
+        document.getElementById("result-modal-bg").classList.remove("show");
+        document.getElementById("projects-modal-bg").classList.remove("show");
+        closeMarker();
       }
+    });
+
+    // ── URL input bar — generate /watch --preview command from a pasted URL ──
+    function isPlausibleUrl(s) {
+      if (!s) return false;
+      const trimmed = String(s).trim();
+      if (!trimmed) return false;
+      // yt-dlp accepts more than http(s), but for the dashboard's UX a basic
+      // sanity check is enough — the user's terminal will reject anything bogus.
+      return /^https?:\/\/\S+$/i.test(trimmed);
+    }
+    document.getElementById("url-add-btn").addEventListener("click", submitUrl);
+    document.getElementById("url-input").addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); submitUrl(); }
+    });
+    function submitUrl() {
+      const input = document.getElementById("url-input");
+      const url = input.value.trim();
+      if (!isPlausibleUrl(url)) {
+        showToast("That doesn't look like a video URL — paste a full http(s) URL");
+        return;
+      }
+      const cmd = `python "${SCRIPT_PATH}" --preview "${url}"`;
+      navigator.clipboard.writeText(cmd).then(
+        () => { showToast("Command copied — paste in your terminal to start the preview"); input.value = ""; },
+        () => showToast("Couldn't copy — check clipboard permissions")
+      );
+    }
+
+    // ── Manage projects modal ─────────────────────────────────────────────────
+    function openProjects() {
+      renderProjectsList();
+      document.getElementById("projects-add-input").value = "";
+      document.getElementById("projects-modal-bg").classList.add("show");
+    }
+    function closeProjects() {
+      document.getElementById("projects-modal-bg").classList.remove("show");
+    }
+    function renderProjectsList() {
+      const ul = document.getElementById("projects-list");
+      ul.innerHTML = PROJECT_TAGS.map(name => {
+        const isNone = name === "None";
+        return `<li data-name="${escapeHtml(name)}">
+          <span class="proj-name">${isNone ? "(none) — default, can't edit" : escapeHtml(name)}</span>
+          ${isNone
+            ? `<span class="proj-locked">locked</span>`
+            : `<button class="icon" data-action="proj-rename" title="Rename">rename</button>
+               <button class="icon del" data-action="proj-del" title="Delete">delete</button>`}
+        </li>`;
+      }).join("");
+    }
+    function commitProjectsChange(newList) {
+      PROJECT_TAGS = newList;
+      saveProjects(PROJECT_TAGS);
+      // Rebuild the row dropdowns + project filter to reflect changes
+      const projSel = document.getElementById("filter-project");
+      projSel.innerHTML = "";
+      const allOpt = document.createElement("option");
+      allOpt.value = ""; allOpt.textContent = "All projects";
+      projSel.appendChild(allOpt);
+      PROJECT_TAGS.forEach(t => {
+        const opt = document.createElement("option");
+        opt.value = t === "None" ? "(none)" : t;
+        opt.textContent = t === "None" ? "(no tag)" : t;
+        projSel.appendChild(opt);
+      });
+      projSel.value = filterProject;
+      fullRender();
+      renderProjectsList();
+    }
+    function countTagged(tag) {
+      return RECORDS.reduce((n, r) => n + (getAnnot(r.id).project_tag === tag ? 1 : 0), 0);
+    }
+    function clearTagFromAll(tag) {
+      let changed = false;
+      RECORDS.forEach(r => {
+        const a = getAnnot(r.id);
+        if (a.project_tag === tag) { setAnnot(r.id, { project_tag: "None" }); changed = true; }
+      });
+      return changed;
+    }
+    function renameTagOnAll(oldName, newName) {
+      RECORDS.forEach(r => {
+        const a = getAnnot(r.id);
+        if (a.project_tag === oldName) setAnnot(r.id, { project_tag: newName });
+      });
+    }
+    function validateProjectName(name, currentList, exclude) {
+      const trimmed = name.trim();
+      if (!trimmed) return "Name can't be empty";
+      if (trimmed.length > 32) return "Max 32 chars";
+      if (currentList.some(t => t === trimmed && t !== exclude)) return "That name is already in use";
+      return null;
+    }
+
+    document.getElementById("manage-projects-btn").addEventListener("click", openProjects);
+    document.getElementById("projects-close").addEventListener("click", closeProjects);
+    document.getElementById("projects-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "projects-modal-bg") closeProjects();
+    });
+
+    document.getElementById("projects-add-btn").addEventListener("click", () => {
+      const input = document.getElementById("projects-add-input");
+      const name = input.value;
+      const err = validateProjectName(name, PROJECT_TAGS, null);
+      if (err) { showToast(err); return; }
+      commitProjectsChange(PROJECT_TAGS.concat([name.trim()]));
+      input.value = "";
+    });
+    document.getElementById("projects-add-input").addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); document.getElementById("projects-add-btn").click(); }
+    });
+
+    document.getElementById("projects-list").addEventListener("click", e => {
+      const li = e.target.closest("li");
+      if (!li) return;
+      const name = li.dataset.name;
+      const action = e.target.dataset.action;
+      if (!name) return;
+
+      if (action === "proj-del") {
+        const used = countTagged(name);
+        const msg = used > 0
+          ? `${used} ${used === 1 ? "row is" : "rows are"} tagged "${name}". Delete the project and clear those tags?`
+          : `Delete project "${name}"?`;
+        if (!confirm(msg)) return;
+        if (used > 0) clearTagFromAll(name);
+        commitProjectsChange(PROJECT_TAGS.filter(t => t !== name));
+        return;
+      }
+      if (action === "proj-rename") {
+        const span = li.querySelector(".proj-name");
+        span.classList.add("editing");
+        span.innerHTML = `<input type="text" maxlength="32" value="${escapeHtml(name)}">`;
+        const inp = span.querySelector("input");
+        inp.focus(); inp.select();
+        let done = false;
+        const finish = (commit) => {
+          if (done) return;
+          done = true;
+          if (!commit) { renderProjectsList(); return; }
+          const next = inp.value;
+          const err = validateProjectName(next, PROJECT_TAGS, name);
+          if (err) { showToast(err); done = false; inp.focus(); return; }
+          if (next.trim() !== name) {
+            renameTagOnAll(name, next.trim());
+            commitProjectsChange(PROJECT_TAGS.map(t => t === name ? next.trim() : t));
+          } else {
+            renderProjectsList();
+          }
+        };
+        inp.addEventListener("keydown", ev => {
+          if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+          else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+        });
+        inp.addEventListener("blur", () => finish(true), { once: true });
+        return;
+      }
+    });
+
+    document.getElementById("projects-reset").addEventListener("click", () => {
+      if (!confirm("Reset project tags to the seeded defaults? Existing row tags are preserved (they'll show as 'orphan' tags until you re-add them).")) return;
+      commitProjectsChange(PROJECT_TAGS_SEED.slice());
     });
 
     fullRender();
