@@ -173,6 +173,24 @@ To set the env var:
 
 The `--out-dir` flag still works and overrides this — useful for one-off runs you don't want recorded in the dashboard.
 
+## Modes — preview / focused / default
+
+The skill has three invocation modes. Pick based on the video and the user's question.
+
+### Default mode (full pipeline)
+`/watch <url-or-path> [--start ... --end ...]` — extracts dense frames + transcript and reads it all. Good for: short clips (<10 min), focused start/end ranges, or when the user wants a full summary right now.
+
+### Preview mode (sparse, dashboard-driven)
+`python scripts/watch.py --preview <url-or-path>` — downloads the video, extracts ~8-60 sparse timeline thumbs (1 per 10s), pulls the transcript. **Does NOT invoke Claude.** The user opens the dashboard, marks must-watch and skip segments, then runs focused mode. Use when:
+- Video > 10 minutes (default-mode token cost is unbounded)
+- User wants to curate before Claude processes
+- The dashboard is in the workflow
+
+### Focused mode (process marked segments only)
+`python scripts/watch.py --focused --work-dir <dir> --segments-json '[...]' --user-review '...'` — runs against an existing preview. Extracts dense frames ONLY in must-windows (skip-windows excluded). Filters transcript to relevant ranges. Surfaces the user's review/context at the top of the report. Token cost is bounded by segment length.
+
+The dashboard's "Mark segments" button generates the exact focused-mode command for the user to paste. When you receive a paste like that, run it via Bash, then process per the NLM template above.
+
 ## NotebookLM-ready output (Triage Knowledge System integration)
 
 When the user asks for output suitable for **pasting into a NotebookLM topic notebook as a text source**, follow this template. NLM cannot see the JPEG frames directly, so the template embeds your frame descriptions inline at their timestamps — that is the value-add this skill provides over feeding NLM a YouTube URL alone.
@@ -185,6 +203,8 @@ When the user asks for output suitable for **pasting into a NotebookLM topic not
 
 ### Template (emit verbatim, fill in the bracketed fields)
 
+The new NLM template splits the synthesis into three lenses NotebookLM treats as distinct sources: **what was said** (audio-derived), **what was shown** (frame-derived), and **what it means together** (joint understanding). Each section is independent enough that NLM can answer "what did the speaker say about X" using just spoken-content vs "what was shown when discussing X" using just visual-content.
+
 ```markdown
 # [Video title — match the source title exactly]
 
@@ -193,30 +213,36 @@ When the user asks for output suitable for **pasting into a NotebookLM topic not
 **Duration:** [HH:MM:SS]
 **Watched:** [ISO date, today]
 **Transcript source:** [captions | local-whisperx]
+**Marked segments:** [list of must/skip ranges if focused mode was used; "full video" otherwise]
+**User context:** [verbatim quote of --user-review if provided, or "none"]
 
 ## What this video is
 
 [3-5 sentences. Plain language. What it actually covers — strip marketing claims. Name the speaker(s). State the genre: lecture, demo, walkthrough, interview, ad, etc.]
 
-## Key claims and arguments
+## Spoken content
 
-[Bullet list of the substantive claims made, in the order they appear. Each bullet is one tight sentence + the timestamp range where it's discussed. Skip filler / intros / outros / sponsor reads.]
+[Transcript-grounded synthesis. ONLY claims, arguments, and statements that came from the audio/transcript. Per-section timestamps. Skip filler. If the user marked specific segments, scope this to those.]
 
-- [HH:MM-HH:MM] [Claim or argument]
-- [HH:MM-HH:MM] [Claim or argument]
+- [HH:MM-HH:MM] [What was said]
+- [HH:MM-HH:MM] [What was said]
 
-## What's on screen (frame-grounded observations)
-
-[Bullet list. ONLY include observations from frames that add information beyond what's said. Skip frames that show only a talking head with nothing on screen. Examples worth including: code on screen, data tables, slides, charts, UI demos, product screenshots, written-out frameworks, on-screen quotes.]
-
-- [HH:MM] [What is shown and why it matters]
-- [HH:MM] [What is shown and why it matters]
-
-## Direct quotes worth preserving
-
-[2-6 verbatim quotes from the transcript that carry the highest information density. Use blockquote markdown. Include speaker if multiple speakers.]
+### Direct quotes (verbatim from transcript)
 
 > [HH:MM] "[Exact quote]" — [speaker if relevant]
+
+## Visual content
+
+[Frame-grounded synthesis. ONLY observations from frames that add information beyond what's said. Skip pure talking-head frames. Include: code on screen, data tables, slides, charts, UI demos, product screenshots, written-out frameworks, on-screen captions / quotes / overlays.]
+
+- [HH:MM] [What is shown and why it matters]
+- [HH:MM] [What is shown and why it matters]
+
+## Synthesis
+
+[The joint understanding — where audio + visual together produce meaning that neither alone delivered. 3-6 bullets. This is where you connect "speaker says X while showing Y" interpretations. If the video is purely talking-head with nothing notable on screen, this section is short or omitted. If the user provided context via --user-review, integrate it here.]
+
+- [HH:MM] [Joint observation: spoken + shown together]
 
 ## Open questions / unverified claims
 
@@ -238,11 +264,15 @@ When the user asks for output suitable for **pasting into a NotebookLM topic not
 
 ### After producing the template
 
-Two things, in this order:
+Three things, in this order:
 
-1. **Save the same Markdown block to `<work_dir>/nlm-summary.md`** using the Write tool. The work_dir is the path printed at the top of the /watch report (e.g. `D:/Ai-work/Triage/Triage Knowledge System/.watch-cache/watch-<hash>/nlm-summary.md`). This lets the dashboard preview and one-click-copy the summary later. Save it even if the user doesn't ask — it's how the dashboard's "Preview NLM" button finds the content.
+1. **Save your full analysis to `<work_dir>/focused-result.md`** using the Write tool. This is the long-form analysis the user reads in the dashboard's "Result" preview button. Include everything you reasoned through — quotes, frame observations, why the video matters, etc. Verbose is fine here.
 
-2. **Tell the user, in one line:** `NLM-ready summary above and saved to <work_dir>/nlm-summary.md. Paste it into your "[topic name]" notebook as a text source.`
+2. **Save the NLM-ready Markdown block to `<work_dir>/nlm-summary.md`** using the Write tool. This is the structured paste-ready version with `## Spoken content` / `## Visual content` / `## Synthesis` sections (per the template above). Concise. NLM-optimized.
+
+3. **Tell the user, in one line:** `Focused result + NLM summary saved to <work_dir>. Open the dashboard, click 'Result' to review, then click 'NLM' to copy and paste into your "[topic name]" notebook.`
+
+Both files are required — the dashboard's "Result" button reads `focused-result.md`, the "NLM" button reads `nlm-summary.md`. Don't skip either.
 
 Do not summarize the summary in chat.
 
