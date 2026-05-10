@@ -438,10 +438,16 @@ HTML_TEMPLATE = r"""<!doctype html>
     .marker-mtype.must.active {
       background: rgba(213, 159, 79, 0.2); box-shadow: 0 0 0 2px rgba(213, 159, 79, 0.25);
     }
-    .marker-mtype.skip {
+    .marker-mtype.audio {
+      background: transparent; color: var(--accent); border: 1.5px solid var(--accent);
+    }
+    .marker-mtype.audio.active {
+      background: rgba(122, 166, 255, 0.2); box-shadow: 0 0 0 2px rgba(122, 166, 255, 0.25);
+    }
+    .marker-mtype.exclude {
       background: transparent; color: var(--red); border: 1.5px solid var(--red);
     }
-    .marker-mtype.skip.active {
+    .marker-mtype.exclude.active {
       background: rgba(213, 107, 107, 0.2); box-shadow: 0 0 0 2px rgba(213, 107, 107, 0.25);
     }
     .marker-mtype:hover { filter: brightness(1.15); }
@@ -449,7 +455,12 @@ HTML_TEMPLATE = r"""<!doctype html>
       flex: 1; font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums;
     }
     .marker-recording.active.must { color: var(--amber); }
-    .marker-recording.active.skip { color: var(--red); }
+    .marker-recording.active.audio { color: var(--accent); }
+    .marker-recording.active.exclude { color: var(--red); }
+    .marker-toolbar-help {
+      padding: 6px 18px 10px; font-size: 11px; color: var(--muted);
+      background: var(--bg); border-bottom: 1px solid var(--border);
+    }
     .marker-cancel-active {
       width: 22px; height: 22px; padding: 0; border-radius: 11px;
       background: var(--bg); color: var(--muted); border: 1px solid var(--border);
@@ -493,7 +504,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       border-left: 1px solid currentColor; border-right: 1px solid currentColor;
     }
     .marker-timeline-region.must { background: rgba(213, 159, 79, 0.4); color: var(--amber); }
-    .marker-timeline-region.skip { background: rgba(213, 107, 107, 0.4); color: var(--red); }
+    .marker-timeline-region.audio { background: rgba(122, 166, 255, 0.4); color: var(--accent); }
+    .marker-timeline-region.exclude { background: rgba(213, 107, 107, 0.4); color: var(--red); }
     .marker-timeline-region.active {
       border-style: dashed; border-width: 1.5px;
     }
@@ -506,7 +518,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     /* Sparse frame thumbs — tint backgrounds based on segment containment */
     .marker-frame { background: var(--bg); }
     .marker-frame.in-must { background: rgba(213, 159, 79, 0.15); border-color: rgba(213, 159, 79, 0.4); }
-    .marker-frame.in-skip { background: rgba(213, 107, 107, 0.15); border-color: rgba(213, 107, 107, 0.4); }
+    .marker-frame.in-audio { background: rgba(122, 166, 255, 0.15); border-color: rgba(122, 166, 255, 0.4); }
+    .marker-frame.in-exclude { background: rgba(213, 107, 107, 0.15); border-color: rgba(213, 107, 107, 0.4); }
     .marker-frame.in-active { border-style: dashed; }
     .marker-frame.at-playhead { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -589,7 +602,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     .marker-segments-list .seg-badge.must {
       background: rgba(213, 159, 79, 0.15); color: var(--amber); border: 1px solid var(--amber);
     }
-    .marker-segments-list .seg-badge.skip {
+    .marker-segments-list .seg-badge.audio {
+      background: rgba(122, 166, 255, 0.15); color: var(--accent); border: 1px solid var(--accent);
+    }
+    .marker-segments-list .seg-badge.exclude {
       background: rgba(213, 107, 107, 0.15); color: var(--red); border: 1px solid var(--red);
     }
     .marker-segments-list li.active .seg-badge { border-style: dashed; }
@@ -629,6 +645,22 @@ HTML_TEMPLATE = r"""<!doctype html>
       padding: 4px 7px; border-radius: 3px; font: 11px inherit;
     }
     .marker-segments-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 8px 0; }
+
+    /* Token estimator card — visible savings even at zero markers */
+    .marker-token-card .token-big {
+      font-size: 28px; font-weight: 600; color: var(--text);
+      font-variant-numeric: tabular-nums; line-height: 1.1;
+    }
+    .marker-token-card .token-sub { font-size: 11px; color: var(--green); margin-top: 2px; }
+    .marker-token-card .token-sub.full { color: var(--muted); }
+    .marker-token-card .token-bar {
+      margin-top: 10px; height: 6px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+    }
+    .marker-token-card .token-bar-fill {
+      height: 100%; background: linear-gradient(90deg, var(--green), var(--accent));
+      width: 0%; transition: width 200ms;
+    }
 
     .marker-transcript-drawer summary {
       cursor: pointer; padding: 6px 0; font-size: 12px; color: var(--muted); user-select: none;
@@ -785,11 +817,15 @@ HTML_TEMPLATE = r"""<!doctype html>
 
       <div class="marker-toolbar">
         <span class="marker-toolbar-label">DROP MARKER</span>
-        <button id="marker-m-btn" class="marker-mtype must" title="Must — process this segment (M)">M</button>
-        <button id="marker-s-btn" class="marker-mtype skip" title="Skip — exclude this segment (S)">S</button>
+        <button id="marker-m-btn" class="marker-mtype must" title="Add visual frames here (Claude will see this part)">M</button>
+        <button id="marker-a-btn" class="marker-mtype audio" title="Audio-only here (transcript yes, no frames) — same as default, just explicit">A</button>
+        <button id="marker-x-btn" class="marker-mtype exclude" title="Exclude this range entirely (no transcript, no frames)">X</button>
         <span class="marker-recording" id="marker-recording"></span>
         <button id="marker-cancel-active" class="marker-cancel-active" title="Discard the open segment" hidden>×</button>
         <span class="marker-counts" id="marker-counts">No segments yet</span>
+      </div>
+      <div class="marker-toolbar-help">
+        Default: transcript everywhere, no frames. M adds frames where visuals matter. X drops a range entirely.
       </div>
 
       <div class="modal-body marker-body">
@@ -816,8 +852,9 @@ HTML_TEMPLATE = r"""<!doctype html>
                 <span>→</span>
                 <input id="marker-end" class="time" type="text" placeholder="MM:SS">
                 <select id="marker-type">
-                  <option value="must">must (process)</option>
-                  <option value="skip">skip (exclude)</option>
+                  <option value="must">must (frames)</option>
+                  <option value="audio_only">audio-only</option>
+                  <option value="exclude">exclude</option>
                 </select>
                 <input id="marker-intent" class="intent" type="text" placeholder="intent (optional)">
                 <button id="marker-add" class="add">Add segment</button>
@@ -840,6 +877,13 @@ HTML_TEMPLATE = r"""<!doctype html>
               <span class="marker-coverage" id="marker-coverage"></span>
             </h3>
             <ul id="marker-segments-list" class="marker-segments-list"></ul>
+          </div>
+
+          <div class="marker-section marker-token-card">
+            <h3>Estimated tokens</h3>
+            <div class="token-big" id="marker-token-big">—</div>
+            <div class="token-sub" id="marker-token-sub">Open the modal to compute</div>
+            <div class="token-bar"><div class="token-bar-fill" id="marker-token-bar"></div></div>
           </div>
 
           <div class="marker-section marker-context">
@@ -968,14 +1012,27 @@ HTML_TEMPLATE = r"""<!doctype html>
       try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch {}
       return "seg-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     }
+    /** Phase 4: legacy drafts may have type='skip'; normalize to 'exclude'. */
+    function normalizeType(t) { return t === "skip" ? "exclude" : t; }
+    /** type → CSS class fragment (audio_only → audio for tidier selectors) */
+    function typeClass(t) { return t === "audio_only" ? "audio" : t; }
+    /** type → letter for badges and recording status */
+    function typeLetter(t) {
+      return t === "must" ? "M" : t === "audio_only" ? "A" : t === "exclude" ? "X" : "?";
+    }
     function getMarker(id) {
       const raw = markers[id] || { review: "", segments: [], active: null };
-      // Migrate legacy drafts: ensure each segment has an id, ensure `active` field exists.
-      const segments = (raw.segments || []).map(s => s.id ? s : { ...s, id: newSegId() });
+      const segments = (raw.segments || []).map(s => ({
+        ...s,
+        id: s.id || newSegId(),
+        type: normalizeType(s.type),
+      }));
+      let active = raw.active || null;
+      if (active && active.type) active = { ...active, type: normalizeType(active.type) };
       return {
         review: raw.review || "",
         segments,
-        active: raw.active || null,
+        active,
       };
     }
     function setMarker(id, patch) {
@@ -1411,17 +1468,17 @@ HTML_TEMPLATE = r"""<!doctype html>
       const active = draft.active;
       document.querySelectorAll("#marker-frames .marker-frame").forEach(el => {
         const pts = Number(el.dataset.pts);
-        el.classList.remove("in-must", "in-skip", "in-active");
+        el.classList.remove("in-must", "in-audio", "in-exclude", "in-active");
         for (const s of segments) {
           if (pts >= s.start_ms && pts <= s.end_ms) {
-            el.classList.add(s.type === "must" ? "in-must" : "in-skip");
+            el.classList.add(`in-${typeClass(s.type)}`);
             break;
           }
         }
         if (active) {
           const endProvisional = Math.max(active.start_ms, currentMs());
           if (pts >= active.start_ms && pts <= endProvisional) {
-            el.classList.add(active.type === "must" ? "in-must" : "in-skip");
+            el.classList.add(`in-${typeClass(active.type)}`);
             el.classList.add("in-active");
           }
         }
@@ -1448,14 +1505,14 @@ HTML_TEMPLATE = r"""<!doctype html>
       const html = segs.map(s => {
         const left = (s.start_ms / dur) * 100;
         const width = ((s.end_ms - s.start_ms) / dur) * 100;
-        const tip = `${s.type} ${fmtMs(s.start_ms)}–${fmtMs(s.end_ms)}${s.intent ? ' · ' + s.intent : ''}`;
-        return `<div class="marker-timeline-region ${s.type}" style="left:${left}%;width:${width}%" title="${escapeHtml(tip)}"></div>`;
+        const tip = `${typeLetter(s.type)} ${fmtMs(s.start_ms)}–${fmtMs(s.end_ms)}${s.intent ? ' · ' + s.intent : ''}`;
+        return `<div class="marker-timeline-region ${typeClass(s.type)}" style="left:${left}%;width:${width}%" title="${escapeHtml(tip)}"></div>`;
       });
       if (draft.active) {
         const left = (draft.active.start_ms / dur) * 100;
         const cur = Math.max(draft.active.start_ms, currentMs());
         const width = ((cur - draft.active.start_ms) / dur) * 100;
-        html.push(`<div class="marker-timeline-region ${draft.active.type} active" style="left:${left}%;width:${width}%"></div>`);
+        html.push(`<div class="marker-timeline-region ${typeClass(draft.active.type)} active" style="left:${left}%;width:${width}%"></div>`);
       }
       cont.innerHTML = html.join("");
     }
@@ -1491,7 +1548,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     function renderClosedSegmentRow(s) {
       const dur = Math.max(0, (s.end_ms - s.start_ms) / 1000);
       return `<li data-seg-id="${escapeHtml(s.id)}">
-        <span class="seg-badge ${s.type}">${s.type === "must" ? "M" : "S"}</span>
+        <span class="seg-badge ${typeClass(s.type)}">${typeLetter(s.type)}</span>
         <span class="seg-range">
           <span>${fmtMs(s.start_ms)} → ${fmtMs(s.end_ms)}</span>
           <span class="seg-duration">${dur.toFixed(1)}s</span>
@@ -1505,11 +1562,12 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderActiveSegmentRow(active) {
+      const lbl = typeLetter(active.type);
       return `<li class="active" data-active="1">
-        <span class="seg-badge ${active.type}">${active.type === "must" ? "M" : "S"}</span>
+        <span class="seg-badge ${typeClass(active.type)}">${lbl}</span>
         <span class="seg-range">
           <span>${fmtMs(active.start_ms)} → …</span>
-          <span class="seg-active-hint">click ${active.type === "must" ? "M" : "S"} again to close</span>
+          <span class="seg-active-hint">click ${lbl} again to close</span>
         </span>
         <span class="seg-actions">
           <button class="icon del" data-action="active-cancel" title="Discard">×</button>
@@ -1531,9 +1589,12 @@ HTML_TEMPLATE = r"""<!doctype html>
       header.textContent = `Segments (${segs.length})`;
       const dur = durationMs();
       if (dur > 0 && segs.length > 0) {
-        const mustMs = segs.filter(s => s.type === "must").reduce((a, s) => a + (s.end_ms - s.start_ms), 0);
-        const skipMs = segs.filter(s => s.type === "skip").reduce((a, s) => a + (s.end_ms - s.start_ms), 0);
-        coverage.textContent = `${Math.round((mustMs/dur)*100)}% must · ${Math.round((skipMs/dur)*100)}% skip`;
+        const sumMs = (t) => segs.filter(s => s.type === t).reduce((a, s) => a + (s.end_ms - s.start_ms), 0);
+        const mustPct = Math.round((sumMs("must") / dur) * 100);
+        const audioPct = Math.round((sumMs("audio_only") / dur) * 100);
+        const excludePct = Math.round((sumMs("exclude") / dur) * 100);
+        const baselinePct = Math.max(0, 100 - mustPct - audioPct - excludePct);
+        coverage.textContent = `${mustPct}% must · ${audioPct}% audio · ${excludePct}% excluded · ${baselinePct}% baseline`;
       } else {
         coverage.textContent = "";
       }
@@ -1556,62 +1617,101 @@ HTML_TEMPLATE = r"""<!doctype html>
       if (!markerCurrentId) return;
       const draft = getMarker(markerCurrentId);
       const mBtn = document.getElementById("marker-m-btn");
-      const sBtn = document.getElementById("marker-s-btn");
+      const aBtn = document.getElementById("marker-a-btn");
+      const xBtn = document.getElementById("marker-x-btn");
       const rec = document.getElementById("marker-recording");
       const cancel = document.getElementById("marker-cancel-active");
       const counts = document.getElementById("marker-counts");
 
       mBtn.classList.remove("active");
-      sBtn.classList.remove("active");
-      rec.classList.remove("active", "must", "skip");
+      aBtn.classList.remove("active");
+      xBtn.classList.remove("active");
+      rec.classList.remove("active", "must", "audio", "exclude");
 
       if (draft.active) {
-        if (draft.active.type === "must") mBtn.classList.add("active");
-        else sBtn.classList.add("active");
-        rec.classList.add("active", draft.active.type);
-        const lbl = draft.active.type === "must" ? "M" : "S";
+        const btnByType = { must: mBtn, audio_only: aBtn, exclude: xBtn };
+        const btn = btnByType[draft.active.type];
+        if (btn) btn.classList.add("active");
+        rec.classList.add("active", typeClass(draft.active.type));
+        const lbl = typeLetter(draft.active.type);
         rec.textContent = `recording ${lbl} from ${fmtMs(draft.active.start_ms)} — press ${lbl} again to close`;
         cancel.hidden = false;
       } else {
-        rec.textContent = "Press M to mark a must segment, S for skip";
+        rec.textContent = "Press M for visuals, A for audio-only annotation, X to exclude";
         cancel.hidden = true;
       }
 
       const segs = draft.segments || [];
-      counts.textContent = `${segs.filter(s => s.type === "must").length} must · ${segs.filter(s => s.type === "skip").length} skip`;
+      const n = (t) => segs.filter(s => s.type === t).length;
+      counts.textContent = `${n("must")} must · ${n("audio_only")} audio · ${n("exclude")} exclude`;
+    }
+
+    /** Format a token count as "12.0k" for big-number display. */
+    function fmtTokens(n) {
+      if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+      return String(n);
     }
 
     function updateMarkerEstimate() {
       const btn = document.getElementById("marker-copy");
-      const est = document.getElementById("marker-estimate");
-      const draft = getMarker(markerCurrentId);
-      const segs = (draft.segments || []);
-      const must = segs.filter(s => s.type === "must");
-      const skip = segs.filter(s => s.type === "skip");
+      const estFoot = document.getElementById("marker-estimate");
+      const big = document.getElementById("marker-token-big");
+      const sub = document.getElementById("marker-token-sub");
+      const bar = document.getElementById("marker-token-bar");
 
-      const preview = PREVIEWS[markerCurrentId];
-      let mustSec = must.reduce((a, s) => a + Math.max(0, (s.end_ms - s.start_ms) / 1000), 0);
-      if (mustSec === 0 && skip.length > 0 && preview) {
-        const total = (preview.duration_ms || 0) / 1000;
-        const skipped = skip.reduce((a, s) => a + Math.max(0, (s.end_ms - s.start_ms) / 1000), 0);
-        mustSec = Math.max(0, total - skipped);
-      }
-      const frameCount = Math.min(60 * Math.max(1, must.length || 1), Math.max(0, Math.round(mustSec * 2)));
-      const transcriptText = (preview && preview.transcript_segments || [])
-        .filter(s => must.some(m => s.end_ms >= m.start_ms && s.start_ms <= m.end_ms) ||
-                     (must.length === 0 && skip.length > 0 &&
-                      !skip.some(k => s.end_ms >= k.start_ms && s.start_ms <= k.end_ms)))
-        .map(s => s.text || "").join(" ");
-      const wordCount = transcriptText.split(/\s+/).filter(Boolean).length;
-      const tokens = Math.round(frameCount * 800 + wordCount * 1.3);
-
-      if (segs.length === 0) {
-        est.textContent = "No segments yet";
+      if (!markerCurrentId) {
         btn.disabled = true;
-      } else {
-        est.textContent = `${must.length} must, ${skip.length} skip · ~${frameCount} frames · ~${tokens.toLocaleString()} tokens`;
-        btn.disabled = false;
+        estFoot.textContent = "No segments yet";
+        big.textContent = "—"; sub.textContent = "Open a preview-ready record"; bar.style.width = "0%";
+        return;
       }
+
+      const draft = getMarker(markerCurrentId);
+      const segs = draft.segments || [];
+      const must = segs.filter(s => s.type === "must");
+      const audioCount = segs.filter(s => s.type === "audio_only").length;
+      const exclude = segs.filter(s => s.type === "exclude");
+
+      // Phase 4 audio-only baseline math (mirrors watch.py for consistency):
+      //   frames    = sum(must dur) × 2 fps × 800 tokens
+      //   transcript = (kept_audio / total_audio) × full_word_count × 1.3
+      //   full_pipeline_baseline = 100 frames × 800 + full_words × 1.3 = 80k + transcript
+      const preview = PREVIEWS[markerCurrentId];
+      const dur_s = preview && (preview.duration_seconds || (preview.duration_ms ? preview.duration_ms / 1000 : 0)) || 0;
+      const fullWords = (preview && preview.transcript_segments || [])
+        .reduce((a, s) => a + (s.text || "").split(/\s+/).filter(Boolean).length, 0);
+
+      const mustSec = must.reduce((a, s) => a + Math.max(0, (s.end_ms - s.start_ms) / 1000), 0);
+      const excludeSec = exclude.reduce((a, s) => a + Math.max(0, (s.end_ms - s.start_ms) / 1000), 0);
+      const audioKept = Math.max(0, dur_s - excludeSec);
+
+      const frameTokens = Math.round(mustSec * 2 * 800);
+      const transcriptTokens = dur_s > 0
+        ? Math.round((audioKept / dur_s) * fullWords * 1.3)
+        : 0;
+      const totalTokens = frameTokens + transcriptTokens;
+      const fullPipeline = 80000 + Math.round(fullWords * 1.3);
+      const savedPct = fullPipeline > 0
+        ? Math.max(0, Math.round((1 - totalTokens / fullPipeline) * 100))
+        : 0;
+      const ratio = fullPipeline > 0 ? Math.min(100, (totalTokens / fullPipeline) * 100) : 0;
+
+      // Token card
+      big.textContent = `~${fmtTokens(totalTokens)}`;
+      sub.textContent = savedPct > 0
+        ? `${savedPct}% saved vs full pipeline`
+        : "Same cost as full pipeline";
+      sub.classList.toggle("full", savedPct === 0);
+      bar.style.width = `${ratio.toFixed(1)}%`;
+
+      // Footer one-liner — same numbers, compact
+      if (segs.length === 0) {
+        estFoot.textContent = `Audio-only baseline · ~${fmtTokens(totalTokens)} tokens (${savedPct}% saved)`;
+      } else {
+        estFoot.textContent = `${must.length} must · ${audioCount} audio · ${exclude.length} exclude · ~${fmtTokens(totalTokens)} tokens (${savedPct}% saved)`;
+      }
+      // Phase 4: zero markers is valid (audio-only baseline). Always allow copy.
+      btn.disabled = false;
     }
 
     /** Build the focused-mode command for clipboard paste. */
@@ -1633,14 +1733,14 @@ HTML_TEMPLATE = r"""<!doctype html>
       if (e.target.id === "marker-modal-bg") closeMarker();
     });
 
-    /** M/S core: toggle the active segment of the given type. */
+    /** Toggle the active segment of the given type (must / audio_only / exclude). */
     function dropMarker(type) {
       if (!markerCurrentId) return;
       const draft = getMarker(markerCurrentId);
       const cur = currentMs();
       if (draft.active) {
         if (draft.active.type !== type) {
-          showToast(`Close the open ${draft.active.type} segment first (or click cancel ×)`);
+          showToast(`Close the open ${typeLetter(draft.active.type)} segment first (or click cancel ×)`);
           return;
         }
         const startMs = draft.active.start_ms;
@@ -1660,7 +1760,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     document.getElementById("marker-m-btn").addEventListener("click", () => dropMarker("must"));
-    document.getElementById("marker-s-btn").addEventListener("click", () => dropMarker("skip"));
+    document.getElementById("marker-a-btn").addEventListener("click", () => dropMarker("audio_only"));
+    document.getElementById("marker-x-btn").addEventListener("click", () => dropMarker("exclude"));
     document.getElementById("marker-cancel-active").addEventListener("click", () => {
       if (!markerCurrentId) return;
       setMarker(markerCurrentId, { active: null });
@@ -1714,8 +1815,9 @@ HTML_TEMPLATE = r"""<!doctype html>
           <span>→</span>
           <input class="time" type="text" data-action="edit-end" value="${escapeHtml(fmtMs(seg.end_ms))}">
           <select data-action="edit-type">
-            <option value="must" ${seg.type === "must" ? "selected" : ""}>must</option>
-            <option value="skip" ${seg.type === "skip" ? "selected" : ""}>skip</option>
+            <option value="must" ${seg.type === "must" ? "selected" : ""}>must (frames)</option>
+            <option value="audio_only" ${seg.type === "audio_only" ? "selected" : ""}>audio-only</option>
+            <option value="exclude" ${seg.type === "exclude" ? "selected" : ""}>exclude</option>
           </select>
           <input class="intent" type="text" data-action="edit-intent" value="${escapeHtml(seg.intent || '')}" placeholder="intent">
           <button class="save" data-action="seg-edit-save">Save</button>
@@ -1809,16 +1911,11 @@ HTML_TEMPLATE = r"""<!doctype html>
       renderMarkerSegments();
     });
 
-    // Copy /watch --focused command
+    // Copy /watch --focused command (zero markers is valid: audio-only baseline)
     document.getElementById("marker-copy").addEventListener("click", () => {
       if (!markerCurrentId) return;
       const rec = RECORDS.find(r => r.id === markerCurrentId);
       if (!rec) return;
-      const draft = getMarker(markerCurrentId);
-      if (!draft.segments || draft.segments.length === 0) {
-        showToast("Add at least one segment first");
-        return;
-      }
       const cmd = buildFocusedCommand(rec);
       navigator.clipboard.writeText(cmd).then(
         () => showToast("Focused command copied — paste into Claude Code to process"),
@@ -1871,8 +1968,11 @@ HTML_TEMPLATE = r"""<!doctype html>
       if (markerOpen && (e.key === "m" || e.key === "M")) {
         e.preventDefault(); dropMarker("must"); return;
       }
-      if (markerOpen && (e.key === "s" || e.key === "S")) {
-        e.preventDefault(); dropMarker("skip"); return;
+      if (markerOpen && (e.key === "a" || e.key === "A")) {
+        e.preventDefault(); dropMarker("audio_only"); return;
+      }
+      if (markerOpen && (e.key === "x" || e.key === "X")) {
+        e.preventDefault(); dropMarker("exclude"); return;
       }
       if (e.key === "/") {
         e.preventDefault();

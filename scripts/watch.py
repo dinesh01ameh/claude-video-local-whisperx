@@ -221,24 +221,40 @@ def cmd_preview(args) -> int:
 
 # ─── FOCUSED MODE ────────────────────────────────────────────────────────────
 
-def _filter_transcript_to_segments(
+def _filter_transcript_excluding(
     transcript_segments: list[dict],
-    must_segments: list[tuple[float, float]],
-    skip_segments: list[tuple[float, float]],
+    exclude_segments: list[tuple[float, float]],
 ) -> list[dict]:
-    """Return transcript segments overlapping must-windows but NOT inside skip-windows."""
+    """Audio-only baseline: keep every line that does NOT overlap an exclude window.
+
+    Phase 4 abandoned the "must overlap" requirement — focused-mode default is
+    full transcript minus excludes, with frames extracted only inside must
+    ranges. An 11-min talking-head with no markers ships ~6k transcript tokens
+    instead of 80k frames + transcript.
+    """
     out = []
     for seg in transcript_segments:
         seg_start, seg_end = seg["start"], seg["end"]
-        in_must = any(seg_end >= ms_start and seg_start <= ms_end for ms_start, ms_end in must_segments) if must_segments else True
-        in_skip = any(seg_end >= sk_start and seg_start <= sk_end for sk_start, sk_end in skip_segments)
-        if in_must and not in_skip:
+        in_exclude = any(
+            seg_end >= ex_start and seg_start <= ex_end
+            for ex_start, ex_end in exclude_segments
+        )
+        if not in_exclude:
             out.append(seg)
     return out
 
 
 def cmd_focused(args) -> int:
-    """Process only marked segments. Dense frames in must-windows, transcript filtered, user review surfaced."""
+    """Audio-only baseline + three marker types (must / audio_only / exclude).
+
+    Default behavior with zero markers: full transcript reaches Claude, no frames.
+    Markers override:
+      must         frames extracted in this range; transcript baseline applies
+      audio_only   informational annotation; same as baseline (no frames)
+      exclude      transcript dropped here too — nothing reaches Claude
+
+    Backwards compat: type='skip' in --segments-json is aliased to 'exclude'.
+    """
     work = Path(args.work_dir).expanduser().resolve()
     if not work.exists():
         raise SystemExit(f"work-dir not found: {work}")
@@ -259,39 +275,55 @@ def cmd_focused(args) -> int:
     if not isinstance(segments_in, list):
         raise SystemExit("--segments-json must be a JSON array")
 
-    must = [(s["start_ms"] / 1000.0, s["end_ms"] / 1000.0) for s in segments_in if s.get("type") == "must"]
-    skip = [(s["start_ms"] / 1000.0, s["end_ms"] / 1000.0) for s in segments_in if s.get("type") == "skip"]
+    # Partition by type. Aliases: 'skip' (legacy) → 'exclude'.
+    def _seg_type(s: dict) -> str:
+        t = (s.get("type") or "").lower()
+        return "exclude" if t == "skip" else t
 
-    if not must and not skip:
-        raise SystemExit("at least one segment with type='must' or 'skip' is required")
-
-    # If only skip segments are given, default the must range to full video
-    if not must and skip:
-        must = [(0.0, full_duration)]
+    must: list[tuple[float, float, str]] = []
+    audio_only: list[tuple[float, float, str]] = []
+    exclude: list[tuple[float, float, str]] = []
+    for s in segments_in:
+        try:
+            start_s = float(s["start_ms"]) / 1000.0
+            end_s = float(s["end_ms"]) / 1000.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end_s <= start_s:
+            continue
+        intent = (s.get("intent") or "").strip()
+        t = _seg_type(s)
+        if t == "must":
+            must.append((start_s, end_s, intent))
+        elif t == "audio_only":
+            audio_only.append((start_s, end_s, intent))
+        elif t == "exclude":
+            exclude.append((start_s, end_s, intent))
 
     project_dir, _ = _resolve_project_dir(None)
 
-    # Reconstruct transcript segments in seconds for filtering
-    transcript_segments = [
+    # Reconstruct transcript segments in seconds for filtering / output.
+    full_transcript_segments = [
         {"start": s["start_ms"] / 1000.0, "end": s["end_ms"] / 1000.0, "text": s["text"]}
         for s in preview.get("transcript_segments", [])
     ]
-    filtered_transcript = _filter_transcript_to_segments(transcript_segments, must, skip)
+    full_word_count = sum(len((s.get("text") or "").split()) for s in full_transcript_segments)
 
-    # Extract dense frames per must segment
+    exclude_pairs = [(s, e) for s, e, _ in exclude]
+    filtered_transcript = _filter_transcript_excluding(full_transcript_segments, exclude_pairs)
+    filtered_word_count = sum(len((s.get("text") or "").split()) for s in filtered_transcript)
+
+    # Extract dense frames per must segment (audio_only / exclude get no frames).
     frames_dir = work / "focused-frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    all_focused_frames = []
-
-    for i, (start_s, end_s) in enumerate(must):
+    all_focused_frames: list[dict] = []
+    for i, (start_s, end_s, _intent) in enumerate(must):
         seg_dur = max(0.0, end_s - start_s)
         if seg_dur <= 0:
             continue
-        # Dense fps: aim for ~2 frames/sec, cap at 60 frames per segment
         target = min(60, max(4, int(seg_dur * 2)))
         seg_fps = target / seg_dur if seg_dur > 0 else 1.0
         seg_fps = min(seg_fps, MAX_FPS)
-
         seg_subdir = frames_dir / f"seg_{i + 1:02d}"
         seg_frames = extract(
             video_path,
@@ -308,88 +340,131 @@ def cmd_focused(args) -> int:
             f["segment_end_ms"] = int(end_s * 1000)
         all_focused_frames.extend(seg_frames)
 
+    # Token estimates — mirror dashboard math so the two surfaces agree.
+    frame_tokens = len(all_focused_frames) * 800
+    transcript_tokens = int(filtered_word_count * 1.3)
+    total_tokens = frame_tokens + transcript_tokens
+    full_pipeline_tokens = 80_000 + int(full_word_count * 1.3)
+    saved_pct = 0.0
+    if full_pipeline_tokens > 0:
+        saved_pct = max(0.0, min(100.0, (1.0 - total_tokens / full_pipeline_tokens) * 100.0))
+
     focused_data = {
-        "segments_must": [{"start_ms": int(s * 1000), "end_ms": int(e * 1000)} for s, e in must],
-        "segments_skip": [{"start_ms": int(s * 1000), "end_ms": int(e * 1000)} for s, e in skip],
-        "segment_intents": {
-            f"{s.get('start_ms')}-{s.get('end_ms')}": s.get("intent", "")
-            for s in segments_in if s.get("intent")
-        },
+        "segments_must": [
+            {"start_ms": int(s * 1000), "end_ms": int(e * 1000), "intent": intent}
+            for s, e, intent in must
+        ],
+        "segments_audio_only": [
+            {"start_ms": int(s * 1000), "end_ms": int(e * 1000), "intent": intent}
+            for s, e, intent in audio_only
+        ],
+        "segments_exclude": [
+            {"start_ms": int(s * 1000), "end_ms": int(e * 1000), "intent": intent}
+            for s, e, intent in exclude
+        ],
         "user_review": args.user_review or "",
         "frames_count": len(all_focused_frames),
         "transcript_segment_count": len(filtered_transcript),
-        "tokens_estimated": _estimate_tokens(all_focused_frames, filtered_transcript),
+        "tokens_estimated": total_tokens,
+        "tokens_saved_percent": round(saved_pct, 1),
         "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    (work / "focused.json").write_text(json.dumps(focused_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    (work / "focused.json").write_text(
+        json.dumps(focused_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
-    # Update manifest with focused state
     if project_dir is not None:
         _update_manifest_record(project_dir, work.name, {
             "state": "focused-ready",
             "focused": focused_data,
+            "token_estimate": total_tokens,
+            "tokens_saved_percent": round(saved_pct, 1),
         })
 
-    # ── Print Markdown report optimized for Claude consumption ────────────────
+    # ── Markdown report — Claude consumes this directly ───────────────────────
     print()
     print("# /watch focused: process this video")
     print()
     if args.user_review:
-        print("## User context (read this first)")
+        print("## User context")
         print()
         print(f"> {args.user_review}")
         print()
 
     print("## What you have")
     print()
-    print(f"- Frames: {len(all_focused_frames)} (dense, only inside the user's must-windows)")
-    print(f"- Transcript segments: {len(filtered_transcript)} (filtered to must-windows, skip-windows excluded)")
-    print(f"- Estimated input tokens: ~{focused_data['tokens_estimated']:,}")
+    print(f"- Total transcript: {len(filtered_transcript)} segments (full minus excludes), ~{transcript_tokens:,} tokens")
+    print(
+        f"- Visual moments: {len(must)} must segment{'s' if len(must) != 1 else ''} "
+        f"with dense frames ({len(all_focused_frames)} frames, ~{frame_tokens:,} tokens)"
+    )
+    print(f"- Audio-only annotations: {len(audio_only)} (informational; no frames)")
+    print(f"- Excluded ranges: {len(exclude)}")
+    print(f"- Estimated total tokens: ~{total_tokens:,} (~{round(saved_pct)}% saved vs full pipeline)")
     print(f"- Work dir: `{work}`")
     print()
 
-    # Per-segment frames + intent
-    print("## Marked segments")
-    print()
-    for i, (start_s, end_s) in enumerate(must):
-        intent = focused_data["segment_intents"].get(f"{int(start_s*1000)}-{int(end_s*1000)}", "")
-        print(f"### Segment {i + 1}: {format_time(start_s)} → {format_time(end_s)}")
-        if intent:
-            print(f"**Intent:** {intent}")
+    if must:
+        print("## Visual moments (frames + transcript here)")
         print()
-        seg_frames = [f for f in all_focused_frames if f.get("segment_index") == i + 1]
-        for f in seg_frames:
-            print(f"- `{f['path']}` (t={format_time(f['timestamp_seconds'])})")
-        print()
+        for i, (start_s, end_s, intent) in enumerate(must):
+            print(f"### Segment {i + 1} (must): {format_time(start_s)} → {format_time(end_s)}")
+            if intent:
+                print(f"Intent: {intent}")
+            seg_frames = [f for f in all_focused_frames if f.get("segment_index") == i + 1]
+            if seg_frames:
+                print()
+                print("Frames:")
+                for f in seg_frames:
+                    print(f"- `{f['path']}` (t={format_time(f['timestamp_seconds'])})")
+            print()
 
-    if skip:
-        print("## Skipped segments (do not process)")
+    if audio_only:
+        print("## Audio-only annotations (transcript-only sections, called out for context)")
         print()
-        for s, e in skip:
-            print(f"- {format_time(s)} → {format_time(e)}")
-        print()
+        for i, (start_s, end_s, intent) in enumerate(audio_only):
+            label = i + 1 + len(must)
+            print(f"### Segment {label} (audio_only): {format_time(start_s)} → {format_time(end_s)}")
+            if intent:
+                print(f"Intent: {intent}")
+            print()
 
-    print("## Filtered transcript")
+    print("## Audio timeline (continuous transcript with excluded ranges marked)")
     print()
-    if filtered_transcript:
+    if filtered_transcript or exclude:
         print("```")
-        print(format_transcript(filtered_transcript))
+        events: list[tuple[float, str]] = []
+        for seg in filtered_transcript:
+            ts = format_time(seg["start"])
+            text = (seg.get("text") or "").strip()
+            events.append((seg["start"], f"[{ts}] {text}"))
+        for ex_start, ex_end, intent in exclude:
+            ts_a = format_time(ex_start)
+            ts_b = format_time(ex_end)
+            label = f"[excluded {ts_a} → {ts_b}{': ' + intent if intent else ''}]"
+            events.append((ex_start, label))
+        events.sort(key=lambda x: x[0])
+        for _, line in events:
+            print(line)
         print("```")
     else:
-        print("_No transcript content in marked segments._")
+        print("_No transcript content available._")
     print()
 
     print("## What to do")
     print()
-    print(f"1. **Read each frame path above** with the Read tool (parallel calls within a segment, sequential across segments).")
-    print(f"2. **Synthesize** per the SKILL.md NLM-ready output template — use the new structure: `## Spoken content` + `## Visual content` + `## Synthesis`.")
-    print(f"3. **Save to two files** in `{work}`:")
-    print(f"   - `focused-result.md` — your full analysis (the user reads this in the dashboard)")
-    print(f"   - `nlm-summary.md` — the NLM-ready paste version (same content, formatted for the user's NotebookLM topic)")
-    print(f"4. **Confirm to the user** in one line: `Focused result + NLM summary saved. Open the dashboard to review and paste.`")
+    print('1. Read each frame path under "Visual moments" with the Read tool (parallel within a segment, sequential across segments).')
+    print(
+        '2. Synthesize per the SKILL.md NLM template. CRITICAL: "## Visual content" must only cite '
+        'observations from frames in must segments. "## Spoken content" sources from the full audio '
+        'timeline above. Audio-only segments are context flags, not their own content section.'
+    )
+    print(f"3. Save `focused-result.md` (full analysis) and `nlm-summary.md` (NLM-paste version) to `{work}`.")
+    print("4. Confirm to user in one line: `Focused result + NLM summary saved. Open the dashboard to review and paste.`")
     print()
     print("---")
-    print(f"_Work dir: `{work}` — keep until the user has pasted the NLM summary._")
+    print(f"_Work dir: `{work}`_")
 
     return 0
 

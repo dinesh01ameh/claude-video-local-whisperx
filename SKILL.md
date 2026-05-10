@@ -187,9 +187,21 @@ The skill has three invocation modes. Pick based on the video and the user's que
 - The dashboard is in the workflow
 
 ### Focused mode (process marked segments only)
-`python scripts/watch.py --focused --work-dir <dir> --segments-json '[...]' --user-review '...'` — runs against an existing preview. Extracts dense frames ONLY in must-windows (skip-windows excluded). Filters transcript to relevant ranges. Surfaces the user's review/context at the top of the report. Token cost is bounded by segment length.
+`python scripts/watch.py --focused --work-dir <dir> --segments-json '[...]' --user-review '...'` — runs against an existing preview. Uses an **audio-only baseline**: every transcript line ships to Claude by default, and frames are only extracted inside `must` ranges. Token cost scales with audio length, not frame count.
 
 The dashboard's "Mark segments" button generates the exact focused-mode command for the user to paste. When you receive a paste like that, run it via Bash, then process per the NLM template above.
+
+### The three marker types in focused mode
+
+Focused mode uses an **audio-only baseline**: every transcript line goes to Claude by default, no frames. Markers override:
+
+- **M (must)** — extract dense frames in this range. Use for slide decks, code on screen, demos, UI walkthroughs, anything where what's shown matters as much as what's said.
+- **A (audio-only)** — explicit annotation that this section is talking-head / audio-driven. Functionally identical to baseline; useful when you want to attach an intent like "listen for the punchline" so it shows up in the segments list.
+- **X (exclude)** — drop the transcript here too. Use for sponsor reads, intros, outros, dead air, music interludes — anything that should not reach Claude at all.
+
+Token impact: an 11-minute talking-head video with zero markers costs ~6k tokens (full transcript, no frames). The same video as a "must everything" mark costs ~85k. Mark visual moments as M to selectively add frame tokens where they earn their cost.
+
+Backwards-compat: legacy `type="skip"` in `--segments-json` is silently aliased to `type="exclude"` — old marker drafts and old generated commands keep working.
 
 ## NotebookLM-ready output (Triage Knowledge System integration)
 
@@ -213,7 +225,7 @@ The new NLM template splits the synthesis into three lenses NotebookLM treats as
 **Duration:** [HH:MM:SS]
 **Watched:** [ISO date, today]
 **Transcript source:** [captions | local-whisperx]
-**Marked segments:** [list of must/skip ranges if focused mode was used; "full video" otherwise]
+**Marked segments:** [list of must / audio-only / exclude ranges if focused mode was used; "audio-only baseline (no markers)" if none were dropped]
 **User context:** [verbatim quote of --user-review if provided, or "none"]
 
 ## What this video is
@@ -252,6 +264,16 @@ The new NLM template splits the synthesis into three lenses NotebookLM treats as
 
 [Comma-separated tags relevant to the user's project structure. Default tags: video, [topic-name]. Add project tags (mms, pkc, amrocky, sheeltron, serversupply, byrefab) only if the content is directly applicable to that project.]
 ```
+
+### Section sourcing (where each lens pulls from)
+
+Phase 4's audio-only baseline changes what each NLM section can cite. Honor the boundaries:
+
+- **`## Spoken content`** — sources from the **full audio timeline** the focused-mode pipeline gave you (full transcript minus any `exclude` ranges, which are already removed). This is everything Claude was told audibly. If you didn't see a quote here, you can't cite it.
+- **`## Visual content`** — sources **only from frames inside `must` segments**. Frames were not extracted outside must ranges, so anything visual you mention here must be backed by a specific frame path. If the user dropped zero `must` markers, this section is short or omitted.
+- **`## Synthesis`** — the joint understanding. Where audio + visuals together produce meaning that neither alone delivered. If there are no `must` frames, this section degrades to "audio-only synthesis" and may also be brief.
+
+Audio-only segments (`A` markers) do **not** get their own NLM section. They're workflow flags the user dropped to annotate intent ("listen for the punchline"), not their own content lens. Fold any insight from those ranges into `## Spoken content` where relevant.
 
 ### Style rules for NLM-ready output
 
