@@ -501,7 +501,9 @@ def _delete_record_by_id(rid: str, records: list[dict]) -> tuple[dict, int]:
     if idx is None:
         raise HTTPException(404, f"record not found: {rid}")
     rec = records[idx]
-    work_dir = rec.get("work_dir") or ""
+    # Normalize legacy sandbox paths (/sessions/.../mnt/.../.watch-cache/...) to
+    # the host project root so the same record can be deleted from any host.
+    work_dir = _rewrite_path(rec.get("work_dir") or "", PROJECT_DIR)
     if _is_active_workdir(work_dir):
         raise HTTPException(409, f"cannot delete — job in progress on {rid}")
     work_path = _validate_workdir_under_cache(work_dir)
@@ -597,6 +599,13 @@ app = FastAPI(title="watch dashboard server", docs_url=None, redoc_url=None)
 @app.get("/")
 def root():
     return RedirectResponse("/dashboard.html")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """Silence Chrome's default favicon probe — we don't ship one."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
 
 
 @app.get("/dashboard.html")
@@ -848,9 +857,12 @@ def api_disk():
     by_record = []
     cache_total = 0
     for r in records:
-        wd = r.get("work_dir")
-        if not wd:
+        wd_raw = r.get("work_dir")
+        if not wd_raw:
             continue
+        # Same legacy-path normalization as the delete endpoint — sandbox-path
+        # records would otherwise silently disappear from the disk total.
+        wd = _rewrite_path(wd_raw, PROJECT_DIR)
         try:
             wp = Path(wd).expanduser().resolve()
             wp.relative_to(CACHE_DIR.resolve())
