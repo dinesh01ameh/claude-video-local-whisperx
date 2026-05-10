@@ -76,6 +76,25 @@ GET  /health                                                          →  {mode
 
 Async upload + poll (5 s interval, 10 min timeout). The vendored client is at `scripts/local_whisperx.py`.
 
+## Running the dashboard server (optional, recommended)
+
+By default, the dashboard is a static HTML file — you copy commands and paste them into a terminal. For one-click operation, run the bundled server:
+
+```powershell
+pip install --user fastapi uvicorn
+$env:WATCH_PROJECT_DIR = "D:\Ai-work\Triage\Triage Knowledge System"
+cd "D:\Ai-work\Triage\Triage Knowledge System\claude-video-local-whisperx"
+python scripts\dashboard_server.py
+```
+
+Then open http://localhost:4893 in your browser. Paste a URL in the dashboard input → click Add → server runs the preview for you. Watch job progress live. New rows appear without manual refresh.
+
+Marker workflow: click **Send to Claude** on a preview-ready row → server runs `--focused` extraction → `focused-report.md` saved to the work dir → one-click prompt copy for Cowork or Claude Code (the synthesis step still needs a Claude session; the extraction step is automated).
+
+If the server isn't running, the dashboard falls back to clipboard mode automatically — open `dashboard.html` directly via `file://` for the same UI minus the live job polling.
+
+The server runs on `127.0.0.1:4893` (override with `$env:WATCH_SERVER_PORT=4894`). Localhost-only by design — no auth, no external exposure. Logs rotate at 10 MB into `<project>/.watch-cache/server.log`.
+
 ## License
 
 MIT, same as upstream. Original work © Bradley Bonanno; modifications © Dinesh Raj.

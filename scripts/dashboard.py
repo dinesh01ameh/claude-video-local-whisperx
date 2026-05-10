@@ -202,6 +202,12 @@ def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
     # `python <script> --focused ...` command users copy to clipboard.
     script_path = (Path(__file__).parent.resolve() / "watch.py")
 
+    # Forward-slash project root — JS uses this in server mode to strip the
+    # absolute prefix from manifest paths and re-root them under /files/*.
+    project_root_forward_slash = json.dumps(
+        str(project_root).replace("\\", "/"), ensure_ascii=False
+    )
+
     data_json = json.dumps(records, ensure_ascii=False)
     summaries_json = json.dumps(summaries, ensure_ascii=False)
     focused_results_json = json.dumps(focused_results, ensure_ascii=False)
@@ -218,6 +224,7 @@ def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
         .replace("{{PREVIEWS}}", previews_json)
         .replace("{{PROJECT_TAGS}}", tags_json)
         .replace("{{SCRIPT_PATH}}", script_path_json)
+        .replace("{{PROJECT_DIR_FORWARD_SLASH}}", project_root_forward_slash)
         .replace("{{GENERATED_AT}}", generated_at)
         .replace("{{COUNT}}", str(len(records)))
     )
@@ -248,11 +255,19 @@ HTML_TEMPLATE = r"""<!doctype html>
     .topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
     .topbar .meta { color: var(--muted); font-size: 11px; }
     .topbar .topbar-btn {
-      margin-left: auto; background: var(--bg); color: var(--muted);
+      background: var(--bg); color: var(--muted);
       border: 1px solid var(--border); padding: 5px 12px; border-radius: 4px;
       font: 11px inherit; cursor: pointer;
     }
     .topbar .topbar-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .topbar .conn-indicator {
+      display: none; margin-left: auto;
+      width: 9px; height: 9px; border-radius: 50%; background: var(--muted);
+      align-self: center;
+    }
+    .topbar .conn-indicator.show { display: inline-block; }
+    .topbar .conn-indicator.ok { background: var(--green); box-shadow: 0 0 5px rgba(95, 184, 120, 0.6); }
+    .topbar .conn-indicator.fail { background: var(--red); box-shadow: 0 0 5px rgba(213, 107, 107, 0.6); }
 
     .urlbar {
       display: flex; gap: 8px; align-items: center;
@@ -662,6 +677,40 @@ HTML_TEMPLATE = r"""<!doctype html>
       width: 0%; transition: width 200ms;
     }
 
+    /* Job progress modal — surfaced when the dashboard runs in server mode */
+    .job-modal { max-width: 760px; }
+    .job-modal .modal-head { gap: 10px; }
+    .job-status {
+      font-size: 11px; padding: 2px 9px; border-radius: 3px;
+      border: 1px solid var(--border); color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;
+    }
+    .job-status.running { color: var(--amber); border-color: var(--amber); }
+    .job-status.done { color: var(--green); border-color: var(--green); background: rgba(95, 184, 120, 0.08); }
+    .job-status.failed { color: var(--red); border-color: var(--red); }
+    .job-status.queued { color: var(--muted); }
+    .job-cancel {
+      background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+      padding: 4px 10px; border-radius: 3px; cursor: pointer; font: 11px inherit;
+    }
+    .job-cancel:hover { color: var(--red); border-color: var(--red); }
+    .job-detail { color: var(--muted); margin: 0 0 10px; font-size: 12px; }
+    .job-log {
+      max-height: 320px; overflow-y: auto;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 10px; margin: 0;
+      font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: var(--text); white-space: pre-wrap; word-break: break-word;
+    }
+    .job-actions { display: none; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .job-actions.show { display: flex; }
+    .job-actions button {
+      background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
+      padding: 7px 14px; border-radius: 4px; font: 12px inherit; cursor: pointer;
+    }
+    .job-actions button.primary { background: var(--accent); color: var(--bg); font-weight: 600; }
+    .job-actions button:hover { filter: brightness(1.1); }
+
     .marker-transcript-drawer summary {
       cursor: pointer; padding: 6px 0; font-size: 12px; color: var(--muted); user-select: none;
     }
@@ -731,6 +780,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <div class="topbar">
     <h1>/watch dashboard</h1>
     <span class="meta">regenerated {{GENERATED_AT}}</span>
+    <span class="conn-indicator" id="conn-indicator" title="Server connection status"></span>
     <button id="manage-projects-btn" class="topbar-btn" title="Add, rename, or delete project tags">Manage projects</button>
   </div>
 
@@ -935,15 +985,39 @@ HTML_TEMPLATE = r"""<!doctype html>
     </div>
   </div>
 
+  <!-- Job progress modal — server mode only -->
+  <div class="modal-bg" id="job-modal-bg">
+    <div class="modal job-modal">
+      <div class="modal-head">
+        <h2 id="job-modal-title">Job</h2>
+        <span class="job-status" id="job-status">queued</span>
+        <button id="job-cancel" class="job-cancel" title="Terminate this subprocess">Cancel</button>
+        <button id="job-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="job-detail" id="job-detail"></p>
+        <pre class="job-log" id="job-log"></pre>
+        <div class="job-actions" id="job-actions">
+          <button id="job-copy-prompt" class="primary">Copy prompt for Claude Code</button>
+          <button id="job-show-report">View focused report</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
-    const RECORDS = {{DATA}};
-    const SUMMARIES = {{SUMMARIES}};
-    const FOCUSED_RESULTS = {{FOCUSED_RESULTS}};
-    const PREVIEWS = {{PREVIEWS}};
+    let RECORDS = {{DATA}};
+    let SUMMARIES = {{SUMMARIES}};
+    let FOCUSED_RESULTS = {{FOCUSED_RESULTS}};
+    let PREVIEWS = {{PREVIEWS}};
     const PROJECT_TAGS_SEED = {{PROJECT_TAGS}};
     const SCRIPT_PATH = {{SCRIPT_PATH}};
+    const PROJECT_ROOT = {{PROJECT_DIR_FORWARD_SLASH}};
+
+    /** Server mode is on when the page is served over http(s); off on file://. */
+    const SERVER_MODE = (window.location.protocol === "http:" || window.location.protocol === "https:");
     const STATE_KEY = "watch_dashboard_state";
     const UI_KEY = "watch_dashboard_ui";
     const MARKERS_KEY = "watch_dashboard_markers";
@@ -1096,8 +1170,20 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function fileUri(p) {
       if (!p) return "";
-      const norm = p.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "/$1:");
-      return "file:///" + norm.replace(/^\/+/, "");
+      const fwd = p.replace(/\\/g, "/");
+      if (SERVER_MODE) {
+        // Strip the project-root prefix (in forward-slash form) and re-root under /files/*.
+        // Each path component is encoded so spaces and other reserved chars survive.
+        let rel = fwd;
+        if (PROJECT_ROOT && rel.startsWith(PROJECT_ROOT)) {
+          rel = rel.slice(PROJECT_ROOT.length);
+        }
+        if (!rel.startsWith("/")) rel = "/" + rel;
+        const encoded = rel.split("/").map(encodeURIComponent).join("/");
+        return "/files" + encoded;
+      }
+      const norm = fwd.replace(/^([A-Za-z]):/, "/$1:");
+      return "file:///" + encodeURI(norm.replace(/^\/+/, ""));
     }
 
     function showToast(msg) {
@@ -1911,16 +1997,46 @@ HTML_TEMPLATE = r"""<!doctype html>
       renderMarkerSegments();
     });
 
-    // Copy /watch --focused command (zero markers is valid: audio-only baseline)
+    // Copy /watch --focused command — or, in server mode, send to the server
+    // which spawns the subprocess and writes focused-report.md.
     document.getElementById("marker-copy").addEventListener("click", () => {
       if (!markerCurrentId) return;
       const rec = RECORDS.find(r => r.id === markerCurrentId);
       if (!rec) return;
-      const cmd = buildFocusedCommand(rec);
-      navigator.clipboard.writeText(cmd).then(
-        () => showToast("Focused command copied — paste into Claude Code to process"),
-        () => showToast("Couldn't copy — check clipboard permissions")
-      );
+
+      if (SERVER_MODE) {
+        const draft = getMarker(markerCurrentId);
+        const segments = (draft.segments || []).map(s => {
+          const out = { start_ms: s.start_ms, end_ms: s.end_ms, type: s.type };
+          if (s.intent) out.intent = s.intent;
+          return out;
+        });
+        const review = (draft.review || "").replace(/[\r\n]+/g, " ").trim();
+        fetch("/api/focused", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ work_dir: rec.work_dir, segments, user_review: review }),
+        }).then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); });
+          return r.json();
+        }).then(data => {
+          closeMarker();
+          openJobModal(
+            data.job_id,
+            "Focused extraction",
+            "Extracting marked frames and filtering transcript…",
+            { focused_report_path: data.focused_report_path, rec_id: rec.id }
+          );
+        }).catch(err => {
+          showToast("Server rejected focused job: " + err.message);
+        });
+      } else {
+        const cmd = buildFocusedCommand(rec);
+        navigator.clipboard.writeText(cmd).then(
+          () => showToast("Focused command copied — paste into Claude Code to process"),
+          () => showToast("Couldn't copy — check clipboard permissions")
+        );
+      }
     });
 
     // Filter wiring + persistence
@@ -2007,11 +2123,27 @@ HTML_TEMPLATE = r"""<!doctype html>
         showToast("That doesn't look like a video URL — paste a full http(s) URL");
         return;
       }
-      const cmd = `python "${SCRIPT_PATH}" --preview "${url}"`;
-      navigator.clipboard.writeText(cmd).then(
-        () => { showToast("Command copied — paste in your terminal to start the preview"); input.value = ""; },
-        () => showToast("Couldn't copy — check clipboard permissions")
-      );
+      if (SERVER_MODE) {
+        fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        }).then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); });
+          return r.json();
+        }).then(data => {
+          input.value = "";
+          openJobModal(data.job_id, "Preview", "Downloading and extracting sparse frames…", null);
+        }).catch(err => {
+          showToast("Server rejected the preview request: " + err.message);
+        });
+      } else {
+        const cmd = `python "${SCRIPT_PATH}" --preview "${url}"`;
+        navigator.clipboard.writeText(cmd).then(
+          () => { showToast("Command copied — paste in your terminal to start the preview"); input.value = ""; },
+          () => showToast("Couldn't copy — check clipboard permissions")
+        );
+      }
     }
 
     // ── Manage projects modal ─────────────────────────────────────────────────
@@ -2149,6 +2281,142 @@ HTML_TEMPLATE = r"""<!doctype html>
       if (!confirm("Reset project tags to the seeded defaults? Existing row tags are preserved (they'll show as 'orphan' tags until you re-add them).")) return;
       commitProjectsChange(PROJECT_TAGS_SEED.slice());
     });
+
+    // ── Server mode: job modal, manifest poll, connection indicator ──────────
+    let jobPollHandle = null;
+    let currentJobId = null;
+    let currentJobMeta = null;
+
+    function openJobModal(jobId, title, detail, meta) {
+      currentJobId = jobId;
+      currentJobMeta = meta || null;
+      document.getElementById("job-modal-title").textContent = title;
+      document.getElementById("job-detail").textContent = detail || "";
+      const status = document.getElementById("job-status");
+      status.textContent = "queued";
+      status.className = "job-status queued";
+      document.getElementById("job-log").textContent = "";
+      document.getElementById("job-actions").classList.remove("show");
+      document.getElementById("job-cancel").style.display = "inline-block";
+      document.getElementById("job-modal-bg").classList.add("show");
+
+      stopJobPoll();
+      jobPollHandle = setInterval(() => pollJob(jobId), 1500);
+      pollJob(jobId);
+    }
+
+    function closeJobModal() {
+      stopJobPoll();
+      currentJobId = null;
+      currentJobMeta = null;
+      document.getElementById("job-modal-bg").classList.remove("show");
+    }
+
+    function stopJobPoll() {
+      if (jobPollHandle) { clearInterval(jobPollHandle); jobPollHandle = null; }
+    }
+
+    function pollJob(jobId) {
+      fetch(`/api/jobs/${jobId}`)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(job => {
+          setConnIndicator(true);
+          const status = document.getElementById("job-status");
+          status.textContent = job.status;
+          status.className = "job-status " + job.status;
+          const log = document.getElementById("job-log");
+          const wasAtBottom = (log.scrollTop + log.clientHeight) >= (log.scrollHeight - 4);
+          log.textContent = (job.log_tail || []).join("\n");
+          if (wasAtBottom) log.scrollTop = log.scrollHeight;
+
+          if (job.status === "done") {
+            stopJobPoll();
+            document.getElementById("job-cancel").style.display = "none";
+            // Focused jobs: show the prompt-copy + view-report actions
+            if (currentJobMeta && currentJobMeta.focused_report_path) {
+              document.getElementById("job-actions").classList.add("show");
+            }
+            // Refresh manifest after a brief delay so the new/updated row appears
+            setTimeout(refreshManifest, 800);
+          } else if (job.status === "failed") {
+            stopJobPoll();
+            document.getElementById("job-cancel").style.display = "none";
+            log.textContent += "\n\n[ERROR] " + (job.error || "job failed");
+          }
+        })
+        .catch(err => {
+          setConnIndicator(false);
+          const log = document.getElementById("job-log");
+          log.textContent += "\n[poll error] " + err.message;
+        });
+    }
+
+    if (SERVER_MODE) {
+      document.getElementById("job-close").addEventListener("click", closeJobModal);
+      document.getElementById("job-modal-bg").addEventListener("click", e => {
+        if (e.target.id === "job-modal-bg") closeJobModal();
+      });
+      document.getElementById("job-cancel").addEventListener("click", () => {
+        if (!currentJobId) return;
+        fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" })
+          .then(() => showToast("Cancel sent"))
+          .catch(() => showToast("Couldn't reach server to cancel"));
+      });
+      document.getElementById("job-copy-prompt").addEventListener("click", () => {
+        if (!currentJobMeta || !currentJobMeta.focused_report_path) return;
+        const path = currentJobMeta.focused_report_path;
+        const prompt = `Read "${path}" and follow the /watch SKILL.md NLM template. Save focused-result.md and nlm-summary.md to the same work_dir.`;
+        navigator.clipboard.writeText(prompt).then(
+          () => showToast("Prompt copied — paste in Cowork or Claude Code"),
+          () => showToast("Couldn't copy")
+        );
+      });
+      document.getElementById("job-show-report").addEventListener("click", () => {
+        if (!currentJobMeta || !currentJobMeta.focused_report_path) return;
+        const url = fileUri(currentJobMeta.focused_report_path);
+        fetch(url)
+          .then(r => r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`)))
+          .then(text => { document.getElementById("job-log").textContent = text; })
+          .catch(err => showToast("Couldn't load focused report: " + err.message));
+      });
+
+      // In server mode, the marker-copy primary action sends to the server.
+      const copyBtn = document.getElementById("marker-copy");
+      if (copyBtn) copyBtn.textContent = "Send to Claude";
+    }
+
+    function setConnIndicator(ok) {
+      const ind = document.getElementById("conn-indicator");
+      if (!ind) return;
+      ind.classList.add("show");
+      ind.classList.toggle("ok", !!ok);
+      ind.classList.toggle("fail", !ok);
+      ind.title = ok ? "Server connected" : "Server unreachable — falling back to embedded data";
+    }
+
+    /** Pull the live manifest in server mode. Replaces RECORDS/SUMMARIES/etc.
+     *  and re-renders. No-op in static mode. */
+    function refreshManifest() {
+      if (!SERVER_MODE) return;
+      fetch("/api/manifest")
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(data => {
+          setConnIndicator(true);
+          if (Array.isArray(data.records)) RECORDS = data.records;
+          if (data.summaries) SUMMARIES = data.summaries;
+          if (data.focused_results) FOCUSED_RESULTS = data.focused_results;
+          if (data.previews) PREVIEWS = data.previews;
+          fullRender();
+        })
+        .catch(() => setConnIndicator(false));
+    }
+
+    if (SERVER_MODE) {
+      // First refresh shortly after load (gives bootstrap data time to render),
+      // then poll every 10s. The job modal also triggers a refresh on completion.
+      setTimeout(refreshManifest, 500);
+      setInterval(refreshManifest, 10000);
+    }
 
     fullRender();
   </script>
