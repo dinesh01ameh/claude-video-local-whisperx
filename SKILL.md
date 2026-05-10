@@ -238,7 +238,13 @@ When the user asks for output suitable for **pasting into a NotebookLM topic not
 
 ### After producing the template
 
-Tell the user, in one line: "NLM-ready summary above. Paste it into your `[topic name]` notebook as a text source." Do not summarize the summary in chat.
+Two things, in this order:
+
+1. **Save the same Markdown block to `<work_dir>/nlm-summary.md`** using the Write tool. The work_dir is the path printed at the top of the /watch report (e.g. `D:/Ai-work/Triage/Triage Knowledge System/.watch-cache/watch-<hash>/nlm-summary.md`). This lets the dashboard preview and one-click-copy the summary later. Save it even if the user doesn't ask — it's how the dashboard's "Preview NLM" button finds the content.
+
+2. **Tell the user, in one line:** `NLM-ready summary above and saved to <work_dir>/nlm-summary.md. Paste it into your "[topic name]" notebook as a text source.`
+
+Do not summarize the summary in chat.
 
 ## Security & Permissions
 
