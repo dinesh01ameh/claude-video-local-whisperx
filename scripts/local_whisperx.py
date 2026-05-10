@@ -27,6 +27,39 @@ from urllib.request import Request, urlopen
 DEFAULT_URL = "http://lp-whisperx:8080"
 POLL_INTERVAL_SEC = 5.0
 COLD_START_NOTICE_SEC = 30.0
+_DOTENV_PATH = Path.home() / ".config" / "watch" / ".env"
+
+
+def _bootstrap_env_from_dotenv() -> None:
+    """Load LP_WHISPERX_URL from ~/.config/watch/.env into os.environ.
+
+    setup.py owns the full config schema; this module only needs the URL,
+    so we duplicate just enough .env parsing to stay decoupled. utf-8-sig
+    strips the BOM that PowerShell's Set-Content -Encoding utf8 writes.
+    """
+    if "LP_WHISPERX_URL" in os.environ and os.environ["LP_WHISPERX_URL"].strip():
+        return
+    if not _DOTENV_PATH.exists():
+        return
+    try:
+        for line in _DOTENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() != "LP_WHISPERX_URL":
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                value = value[1:-1]
+            if value:
+                os.environ["LP_WHISPERX_URL"] = value
+            return
+    except OSError:
+        return
+
+
+_bootstrap_env_from_dotenv()
 
 
 def _build_multipart(audio_path: Path, language: str) -> tuple[bytes, str]:
