@@ -702,6 +702,22 @@ HTML_TEMPLATE = r"""<!doctype html>
       font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       color: var(--text); white-space: pre-wrap; word-break: break-word;
     }
+    /* Indeterminate progress bar — runs while extracting / synthesizing */
+    .job-progress {
+      height: 4px; background: var(--bg); border-radius: 2px;
+      margin: 0 0 10px; overflow: hidden; position: relative;
+      border: 1px solid var(--border);
+    }
+    .job-progress-fill {
+      position: absolute; top: 0; bottom: 0; width: 30%;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      animation: job-progress-slide 1.6s linear infinite;
+    }
+    @keyframes job-progress-slide {
+      0% { left: -30%; }
+      100% { left: 100%; }
+    }
+
     .job-log-tabs {
       display: none; gap: 0; margin-bottom: 0;
       border-bottom: 1px solid var(--border);
@@ -846,7 +862,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     .stats .stat.cache-stat.disabled { cursor: not-allowed; }
     .stats .stat.cache-stat.disabled:hover .num { color: var(--muted); }
 
-    /* Confirm-delete modal */
+    /* Confirm-delete modal — bumped above other modals so it stacks correctly
+       when opened from inside another modal (e.g., orphan cleanup). */
+    #confirm-modal-bg { z-index: 110; }
     .confirm-modal { max-width: 460px; }
     .confirm-modal .modal-body p { margin: 0 0 10px; line-height: 1.5; }
     .confirm-detail {
@@ -1215,6 +1233,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="modal-body">
         <p class="job-detail" id="job-detail"></p>
+        <div class="job-progress" id="job-progress" style="display:none">
+          <div class="job-progress-fill"></div>
+        </div>
         <div class="job-log-tabs" id="job-log-tabs">
           <button class="tab active" data-channel="extract">Extract</button>
           <button class="tab" data-channel="synthesis">Synthesis</button>
@@ -2575,6 +2596,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       });
       document.getElementById("job-actions").classList.remove("show");
       document.getElementById("job-cancel").style.display = "inline-block";
+      document.getElementById("job-progress").style.display = "none";
       document.getElementById("job-modal-bg").classList.add("show");
 
       stopJobPoll();
@@ -2610,7 +2632,14 @@ HTML_TEMPLATE = r"""<!doctype html>
         return "Preview";
       }
       if (job.status === "extracting" || job.status === "queued") return "Phase 1/2: Extracting frames + transcript";
-      if (job.status === "synthesizing") return "Phase 2/2: Synthesizing via Claude Code";
+      if (job.status === "synthesizing") {
+        // Surface elapsed time so the user can see progress even when
+        // claude -p is silent during tool use.
+        const elapsedTxt = (job.synthesis_elapsed_sec != null)
+          ? ` · ${Math.round(job.synthesis_elapsed_sec)}s elapsed`
+          : "";
+        return `Phase 2/2: Synthesizing via Claude Code${elapsedTxt}`;
+      }
       if (job.status === "done") return "Done";
       if (job.status === "failed") return "Failed";
       return "Focused job";
@@ -2640,14 +2669,25 @@ HTML_TEMPLATE = r"""<!doctype html>
             autoSwitchedToSynthesis = true;
           }
 
-          // Render the active channel
+          // Render the active channel. Surface a help line when the
+          // synthesis tail is empty during synthesis — claude -p is silent
+          // during tool use, so without this the modal looks stuck.
           const log = document.getElementById("job-log");
           const tail = activeLogChannel === "synthesis"
             ? (job.synthesis_log_tail || [])
             : (job.extract_log_tail || []);
-          const wasAtBottom = (log.scrollTop + log.clientHeight) >= (log.scrollHeight - 4);
-          log.textContent = tail.join("\n");
-          if (wasAtBottom) log.scrollTop = log.scrollHeight;
+          if (activeLogChannel === "synthesis" && tail.length === 0 && job.status === "synthesizing") {
+            log.innerHTML = '<span class="empty-msg">claude -p is silent during tool use. File saves appear here when Claude calls Write.</span>';
+          } else {
+            const wasAtBottom = (log.scrollTop + log.clientHeight) >= (log.scrollHeight - 4);
+            log.textContent = tail.join("\n");
+            if (wasAtBottom) log.scrollTop = log.scrollHeight;
+          }
+
+          // Indeterminate progress bar runs while either phase is active.
+          const progress = document.getElementById("job-progress");
+          progress.style.display =
+            (job.status === "extracting" || job.status === "synthesizing") ? "block" : "none";
 
           if (job.status === "done") {
             stopJobPoll();

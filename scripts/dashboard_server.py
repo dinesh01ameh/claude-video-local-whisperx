@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -132,6 +133,7 @@ def _new_job(kind: str, **extra) -> str:
             "phase": None,
             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "extract_completed_at": None,
+            "synthesis_started_at": None,
             "synthesis_completed_at": None,
             "extract_log_tail": [],
             "synthesis_log_tail": [],
@@ -279,7 +281,27 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
         _update_job(job_id, status="failed", error=f"failed to spawn claude: {exc}")
         return
 
-    _update_job(job_id, status="synthesizing", phase="synthesize", process=proc, pid=proc.pid)
+    synthesis_started_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _update_job(
+        job_id,
+        status="synthesizing", phase="synthesize",
+        process=proc, pid=proc.pid,
+        synthesis_started_at=synthesis_started_iso,
+    )
+    # Surface a hint immediately — claude -p is silent during tool use, so
+    # without this the user sees an empty Synthesis tab and assumes hang.
+    _append_log(
+        job_id,
+        "[INFO] claude -p running silently during tool use; logs appear when it writes files or finishes (~30-90s expected)",
+        channel="synthesis",
+    )
+    # Background file-watcher: complements the subprocess streamer by surfacing
+    # [WROTE] events as soon as Claude saves each .md file via the Write tool.
+    threading.Thread(
+        target=_watch_synthesis_files,
+        args=(job_id, work_path),
+        daemon=True,
+    ).start()
 
     def _verify_outputs(_lines: list[str]) -> None:
         focused_result = work_path / "focused-result.md"
@@ -320,6 +342,51 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
         args=(job_id, proc, _verify_outputs, SYNTHESIS_TIMEOUT_SEC),
         daemon=True,
     ).start()
+
+
+def _watch_synthesis_files(job_id: str, work_path: Path) -> None:
+    """Poll work_path for the two synthesis output files and surface [WROTE]
+    lines into the synthesis log as they appear.
+
+    Stops when both files exist, when the synthesis phase ends (status changes
+    away from 'synthesizing'), or after a 15-minute hard cap. Read-only —
+    never touches the subprocess; complements _run_synthesis_with_timeout.
+    """
+    targets = ("focused-result.md", "nlm-summary.md")
+    seen: set[str] = set()
+    deadline = time.time() + 900  # 15 min hard cap, longer than synthesis timeout
+    while time.time() < deadline:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job or job.get("status") != "synthesizing":
+                break
+            started_iso = job.get("synthesis_started_at")
+        try:
+            started_dt = datetime.fromisoformat(started_iso) if started_iso else None
+        except ValueError:
+            started_dt = None
+        for name in targets:
+            if name in seen:
+                continue
+            p = work_path / name
+            if p.exists():
+                try:
+                    size_kb = p.stat().st_size / 1024.0
+                except OSError:
+                    size_kb = 0.0
+                elapsed = (
+                    (datetime.now(timezone.utc) - started_dt).total_seconds()
+                    if started_dt else 0.0
+                )
+                _append_log(
+                    job_id,
+                    f"[WROTE] {name} ({size_kb:.1f} KB) at {elapsed:.0f}s",
+                    channel="synthesis",
+                )
+                seen.add(name)
+        if seen == set(targets):
+            break
+        time.sleep(1.0)
 
 
 def _run_synthesis_with_timeout(
@@ -748,6 +815,16 @@ def api_job_status(job_id: str):
         job = JOBS.get(job_id)
         if not job:
             raise HTTPException(404, "job not found")
+        # Compute synthesis elapsed live so the dashboard can render a ticking
+        # "Xs elapsed" header even when stdout is silent.
+        started_iso = job.get("synthesis_started_at")
+        synthesis_elapsed = None
+        if started_iso:
+            try:
+                started_dt = datetime.fromisoformat(started_iso)
+                synthesis_elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds()
+            except ValueError:
+                pass
         return {
             "id": job["id"],
             "kind": job.get("kind"),
@@ -755,7 +832,9 @@ def api_job_status(job_id: str):
             "phase": job.get("phase"),
             "started_at": job["started_at"],
             "extract_completed_at": job.get("extract_completed_at"),
+            "synthesis_started_at": job.get("synthesis_started_at"),
             "synthesis_completed_at": job.get("synthesis_completed_at"),
+            "synthesis_elapsed_sec": synthesis_elapsed,
             "extract_log_tail": list(job["extract_log_tail"][-50:]),
             "synthesis_log_tail": list(job["synthesis_log_tail"][-50:]),
             "error": job.get("error"),
