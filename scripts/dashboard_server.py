@@ -196,13 +196,14 @@ def _stream_subprocess(
             else:
                 _update_job(job_id, status="done", returncode=0)
         else:
+            error_msg = _diagnose_subprocess_failure(full_lines, rc)
             _update_job(
                 job_id,
                 status="failed",
                 returncode=rc,
-                error=f"subprocess exited with code {rc}",
+                error=error_msg,
             )
-            logger.warning("job %s subprocess (%s) failed (rc=%d)", job_id, channel, rc)
+            logger.warning("job %s subprocess (%s) failed (rc=%d): %s", job_id, channel, rc, error_msg.split("\n", 1)[0])
     except Exception as exc:
         _update_job(job_id, status="failed", error=str(exc))
         logger.exception("job %s crashed", job_id)
@@ -263,7 +264,12 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
     env["PYTHONIOENCODING"] = "utf-8"
     env["WATCH_PROJECT_DIR"] = str(PROJECT_DIR)
 
-    args = [CLAUDE_BIN, "-p", prompt]
+    # --dangerously-skip-permissions is required for headless invocation:
+    # without it `claude -p` blocks waiting for a permission prompt on Read /
+    # Write tool calls, with no TTY to respond. Verified empirically — without
+    # the flag, synthesis stalls beyond our 600s timeout; with it, the same
+    # workload finishes in 2-5 min.
+    args = [CLAUDE_BIN, "-p", "--dangerously-skip-permissions", prompt]
     logger.info("job %s synthesizing via claude (timeout %ds)", job_id, SYNTHESIS_TIMEOUT_SEC)
     try:
         proc = subprocess.Popen(
@@ -470,6 +476,69 @@ def _safe_join(base: Path, requested: str) -> Path:
 
 
 # ─── Manifest data ───────────────────────────────────────────────────────────
+
+# ─── Subprocess failure diagnosis — actionable hints for common errors ─────
+
+# Patterns checked against the last ~60 lines of stdout/stderr when a
+# subprocess exits non-zero. The first match wins; falls back to the generic
+# "subprocess exited with code N" if nothing matches. Hints are deliberately
+# verbose because they're rendered in the job modal's error footer where the
+# user is debugging.
+SUBPROCESS_FAILURE_HINTS: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(r"Sign in to confirm you[’']?re not a bot", re.IGNORECASE),
+        "YouTube bot-detection challenge. yt-dlp needs an authenticated session.\n"
+        "Quick fix — create %APPDATA%\\yt-dlp\\config.txt (Windows) or "
+        "~/.config/yt-dlp/config (mac/Linux) containing one line:\n"
+        "    --cookies-from-browser chrome\n"
+        "(replace 'chrome' with firefox / edge / brave — whichever browser "
+        "is logged into YouTube). yt-dlp will pick this up on every invocation, "
+        "including the subprocess this server spawns.",
+    ),
+    (
+        re.compile(r"HTTP Error 429"),
+        "YouTube rate-limited the IP (HTTP 429). Wait 5-10 min and retry. "
+        "If it persists, configure browser cookies via yt-dlp's "
+        "--cookies-from-browser flag (see %APPDATA%\\yt-dlp\\config.txt).",
+    ),
+    (
+        re.compile(r"Private video|This video is private", re.IGNORECASE),
+        "Video is private — yt-dlp needs an authenticated session that has "
+        "access. Add cookies via --cookies-from-browser <browser> in yt-dlp's "
+        "config file.",
+    ),
+    (
+        re.compile(r"Members-only content", re.IGNORECASE),
+        "Members-only video — requires channel-membership cookies to download. "
+        "Configure --cookies-from-browser in yt-dlp's config.",
+    ),
+    (
+        re.compile(r"not available in your country|This video is not available", re.IGNORECASE),
+        "Geo-blocked — yt-dlp can't reach this video from your IP. A VPN or "
+        "geo-aware proxy would let you proceed.",
+    ),
+    (
+        re.compile(r"Video unavailable|This video is unavailable", re.IGNORECASE),
+        "Video is unavailable (deleted, removed, or copyright-claimed).",
+    ),
+    (
+        re.compile(r"yt-dlp did not produce a video file"),
+        "yt-dlp finished without producing a video. The lines above usually "
+        "have the upstream cause (auth, geo, format, etc.).",
+    ),
+]
+
+
+def _diagnose_subprocess_failure(lines: list[str], rc: int) -> str:
+    """Return an actionable hint based on captured output, or fall back to the
+    generic 'subprocess exited with code N'. Used by _stream_subprocess to
+    populate the job's `error` field."""
+    text = "\n".join(lines[-60:])
+    for rx, hint in SUBPROCESS_FAILURE_HINTS:
+        if rx.search(text):
+            return hint
+    return f"subprocess exited with code {rc}"
+
 
 # ─── Phase 7: delete / orphan / disk helpers ─────────────────────────────────
 
