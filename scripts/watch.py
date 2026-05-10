@@ -656,6 +656,15 @@ def cmd_default(args) -> int:
 # ─── Argparse + dispatch ─────────────────────────────────────────────────────
 
 def main() -> int:
+    # Windows consoles default to cp1252; the focused-mode report contains
+    # arrows (→) and other non-ASCII chars. Reconfigure stdio to UTF-8 so
+    # piped/captured output doesn't crash on encode.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     ap = argparse.ArgumentParser(
         prog="watch",
         description="Download a video, extract frames, surface transcript. Three modes: default / preview / focused.",
