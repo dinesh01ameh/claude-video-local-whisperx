@@ -801,6 +801,131 @@ HTML_TEMPLATE = r"""<!doctype html>
       padding: 7px 14px; border-radius: 4px; font: 13px inherit; cursor: pointer;
     }
     .projects-add button:hover { background: var(--accent); color: var(--bg); }
+
+    /* Phase 7: server-only cells (select column) hidden in static mode */
+    html.static-mode .server-only-col { display: none !important; }
+
+    /* Phase 7: bulk-select bar (server mode only) */
+    .bulk-bar {
+      display: none; align-items: center; gap: 12px;
+      padding: 10px 20px; background: rgba(122, 166, 255, 0.08);
+      border-bottom: 1px solid var(--accent); font-size: 13px;
+      position: sticky; top: 0; z-index: 5;
+    }
+    .bulk-bar.show { display: flex; }
+    .bulk-bar .count { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .bulk-bar button {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 5px 12px; border-radius: 4px; cursor: pointer; font: 12px inherit;
+    }
+    .bulk-bar button:hover { border-color: var(--accent); }
+    .bulk-bar button.danger {
+      background: var(--red); color: var(--bg); border-color: var(--red); margin-left: auto;
+    }
+    .bulk-bar button.danger:hover { filter: brightness(1.15); }
+
+    /* Select column */
+    td.select-cell, th.select-cell {
+      width: 36px; text-align: center; padding: 8px;
+    }
+    .select-cell input[type=checkbox] {
+      width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent);
+    }
+
+    /* Per-row delete button */
+    .actions button.del-btn {
+      color: var(--muted); border: 1px solid var(--border);
+      background: var(--bg); padding: 2px 9px; border-radius: 3px;
+      cursor: pointer; font: 11px inherit;
+    }
+    .actions button.del-btn:hover { color: var(--red); border-color: var(--red); }
+
+    /* Cache stat (5th stat in topbar) */
+    .stats .stat.cache-stat { cursor: pointer; }
+    .stats .stat.cache-stat:hover .num { color: var(--accent); }
+    .stats .stat.cache-stat.disabled { cursor: not-allowed; }
+    .stats .stat.cache-stat.disabled:hover .num { color: var(--muted); }
+
+    /* Confirm-delete modal */
+    .confirm-modal { max-width: 460px; }
+    .confirm-modal .modal-body p { margin: 0 0 10px; line-height: 1.5; }
+    .confirm-detail {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 10px 12px; margin: 10px 0; font-size: 12px;
+    }
+    .confirm-detail .row { margin-bottom: 4px; }
+    .confirm-detail .row:last-child { margin-bottom: 0; }
+    .confirm-detail .label {
+      color: var(--muted); font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-right: 6px;
+    }
+    .confirm-detail .value {
+      color: var(--text); font-family: ui-monospace, monospace; font-size: 11px;
+      word-break: break-all;
+    }
+    .confirm-warning { color: var(--red); font-size: 12px; }
+    .modal-foot button.danger {
+      background: var(--red); color: var(--bg); border: 1px solid var(--red);
+      padding: 7px 14px; border-radius: 4px; font: 13px inherit;
+      cursor: pointer; font-weight: 500;
+    }
+    .modal-foot button.danger:hover { filter: brightness(1.15); }
+    .modal-foot button.secondary {
+      background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+      padding: 7px 14px; border-radius: 4px; font: 13px inherit; cursor: pointer;
+    }
+    .modal-foot button.secondary:hover { color: var(--text); border-color: var(--accent); }
+
+    /* Orphans modal */
+    .orphans-modal { max-width: 640px; }
+    .orphans-help { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+    .orphans-list {
+      list-style: none; padding: 0; margin: 0 0 12px;
+      max-height: 380px; overflow-y: auto;
+    }
+    .orphans-list li {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 10px; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 4px;
+      margin-bottom: 4px; font-size: 12px; background: var(--bg);
+      align-items: center;
+    }
+    .orphans-list .orphan-info .name {
+      color: var(--text); font-family: ui-monospace, monospace; font-size: 12px;
+    }
+    .orphans-list .orphan-info .meta {
+      color: var(--muted); font-size: 10px; margin-top: 2px;
+    }
+    .orphans-list .orphan-size {
+      color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+    }
+    .orphans-summary { color: var(--muted); font-size: 11px; margin: 8px 0; }
+    .orphans-empty {
+      color: var(--muted); font-style: italic; padding: 24px; text-align: center;
+    }
+
+    /* Disk-breakdown modal */
+    .disk-modal { max-width: 720px; }
+    .disk-summary { color: var(--muted); font-size: 12px; margin: 0 0 14px; line-height: 1.5; }
+    .disk-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .disk-table th {
+      text-align: left; padding: 6px 8px; color: var(--muted);
+      border-bottom: 1px solid var(--border); font-weight: 500;
+    }
+    .disk-table td {
+      padding: 6px 8px; border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .disk-table tr { cursor: pointer; }
+    .disk-table tr:hover td { background: rgba(122, 166, 255, 0.05); }
+    .disk-table td.size {
+      text-align: right; font-variant-numeric: tabular-nums;
+      white-space: nowrap; color: var(--text);
+    }
+    .disk-table td.id-col {
+      color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px;
+    }
   </style>
 </head>
 <body>
@@ -845,9 +970,16 @@ HTML_TEMPLATE = r"""<!doctype html>
     <button class="clear" id="clear-filters">Clear filters</button>
   </div>
 
+  <div class="bulk-bar" id="bulk-bar">
+    <span class="count" id="bulk-count">0 selected</span>
+    <button id="bulk-clear">Clear</button>
+    <button id="bulk-delete-btn" class="danger">Delete selected</button>
+  </div>
+
   <table id="runs">
     <thead>
       <tr>
+        <th class="select-cell server-only-col"><input type="checkbox" id="select-all-rows" title="Select all (filtered)"></th>
         <th data-sort="started_at" class="active">Watched <span class="arrow">▼</span></th>
         <th data-sort="title">Title</th>
         <th></th>
@@ -1012,6 +1144,62 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="modal-foot">
         <button id="projects-reset" class="link">Reset to defaults</button>
+        <button id="orphans-open-btn" class="secondary" title="Server required">Cleanup orphans…</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm delete modal (per-row, bulk, and orphan deletes share this) -->
+  <div class="modal-bg" id="confirm-modal-bg">
+    <div class="modal confirm-modal">
+      <div class="modal-head">
+        <h2 id="confirm-modal-title">Delete?</h2>
+        <button id="confirm-modal-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-modal-message"></p>
+        <div id="confirm-modal-detail" class="confirm-detail" style="display:none"></div>
+        <p class="confirm-warning">This will permanently delete the video, frames, transcript, and any saved analysis. Cannot be undone.</p>
+      </div>
+      <div class="modal-foot">
+        <button id="confirm-modal-cancel" class="secondary">Cancel</button>
+        <button id="confirm-modal-confirm" class="danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Orphan-cleanup modal -->
+  <div class="modal-bg" id="orphans-modal-bg">
+    <div class="modal orphans-modal">
+      <div class="modal-head">
+        <h2>Cleanup orphans</h2>
+        <button id="orphans-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="orphans-help">Work-dirs in <code>.watch-cache/</code> that aren't in the manifest. Usually leftovers from sandbox testing.</p>
+        <ul id="orphans-list" class="orphans-list"></ul>
+        <div class="orphans-summary" id="orphans-summary"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="orphans-select-all" class="secondary">Select all</button>
+        <button id="orphans-delete" class="danger">Delete selected</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Disk usage breakdown modal -->
+  <div class="modal-bg" id="disk-modal-bg">
+    <div class="modal disk-modal">
+      <div class="modal-head">
+        <h2>Disk usage by record</h2>
+        <button id="disk-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="disk-summary" id="disk-summary"></p>
+        <table class="disk-table">
+          <thead><tr><th>Title</th><th style="text-align:right">Size</th><th>ID</th></tr></thead>
+          <tbody id="disk-rows"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -1104,6 +1292,22 @@ HTML_TEMPLATE = r"""<!doctype html>
     let state = loadState();
     const ui = loadUI();
     const markers = loadMarkers();
+
+    // Phase 7: bulk-select state, disk usage, confirm-modal callback.
+    const selectedIds = new Set();
+    const diskState = { cache_total_bytes: 0, video_count: 0, orphan_count: 0, by_record: [] };
+    let confirmCallback = null;
+
+    // Hide server-only columns in static mode via a body class.
+    if (!SERVER_MODE) document.documentElement.classList.add("static-mode");
+
+    function fmtBytes(n) {
+      if (!n || n < 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let i = 0; let v = n;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return v >= 100 ? `${v.toFixed(0)} ${units[i]}` : v >= 10 ? `${v.toFixed(1)} ${units[i]}` : `${v.toFixed(2)} ${units[i]}`;
+    }
 
     function getAnnot(id) {
       return state[id] || { nlm_pasted: false, project_tag: "None", note: "" };
@@ -1277,11 +1481,20 @@ HTML_TEMPLATE = r"""<!doctype html>
         .slice(0, 3)
         .map(([k, v]) => `${k}: ${v}`)
         .join(" · ") || "—";
+      const cacheNum = SERVER_MODE ? fmtBytes(diskState.cache_total_bytes) : "—";
+      const cacheLbl = (SERVER_MODE && diskState.orphan_count > 0)
+        ? `Cache · ${diskState.orphan_count} orphan${diskState.orphan_count !== 1 ? "s" : ""}`
+        : "Cache size";
+      const cacheCls = SERVER_MODE ? "cache-stat" : "cache-stat disabled";
+      const cacheTitle = SERVER_MODE
+        ? "Click for breakdown by record"
+        : "Server required for live disk usage";
       document.getElementById("stats").innerHTML = `
         <div class="stat"><span class="num">${total}</span><span class="lbl">Total</span></div>
         <div class="stat"><span class="num green">${pasted}</span><span class="lbl">Pasted to NLM</span></div>
         <div class="stat"><span class="num amber">${pending}</span><span class="lbl">Pending NLM</span></div>
         <div class="stat"><span class="num muted">${failed}</span><span class="lbl">Failed</span></div>
+        <div class="stat ${cacheCls}" id="cache-stat" title="${cacheTitle}"><span class="num">${cacheNum}</span><span class="lbl">${cacheLbl}</span></div>
         <div class="stat" style="margin-left:auto;"><span class="num" style="font-size:13px;font-weight:400;color:var(--muted);">${topTags}</span><span class="lbl">Top projects</span></div>
       `;
     }
@@ -1374,8 +1587,11 @@ HTML_TEMPLATE = r"""<!doctype html>
         if (hasResult) actionParts.push(`<button data-action="preview-result" title="Read the long-form focused result">Result</button>`);
         if (hasNlm) actionParts.push(`<button data-action="preview-nlm" title="Preview the NLM-ready summary">NLM</button>`);
         actionParts.push(`<button data-action="copy-rerun" title="Copy re-run command to clipboard">re-run</button>`);
+        actionParts.push(`<button data-action="delete-record" class="del-btn" title="Delete this record and its files">delete</button>`);
 
+        const selectChecked = selectedIds.has(r.id) ? "checked" : "";
         return `<tr data-id="${escapeHtml(r.id)}">
+          <td class="select-cell server-only-col"><input type="checkbox" data-action="select-row" ${selectChecked}></td>
           <td><span class="age" title="${escapeHtml(r.started_at || "")}">${fmtAge(r.started_at)}</span></td>
           <td>
             <div class="title">${escapeHtml(r.title || "(no title)")}</div>
@@ -2145,6 +2361,9 @@ HTML_TEMPLATE = r"""<!doctype html>
         document.getElementById("img-modal-bg").classList.remove("show");
         document.getElementById("result-modal-bg").classList.remove("show");
         document.getElementById("projects-modal-bg").classList.remove("show");
+        document.getElementById("confirm-modal-bg").classList.remove("show");
+        document.getElementById("orphans-modal-bg").classList.remove("show");
+        document.getElementById("disk-modal-bg").classList.remove("show");
         closeMarker();
       }
     });
@@ -2613,6 +2832,423 @@ HTML_TEMPLATE = r"""<!doctype html>
       // then poll every 10s. The job modal also triggers a refresh on completion.
       setTimeout(refreshManifest, 500);
       setInterval(refreshManifest, 10000);
+    }
+
+    // ── Phase 7: confirm modal, delete, orphans, disk ────────────────────────
+
+    function openConfirm({ title, message, detail, confirmLabel, onConfirm }) {
+      document.getElementById("confirm-modal-title").textContent = title || "Delete?";
+      document.getElementById("confirm-modal-message").textContent = message || "";
+      const detailEl = document.getElementById("confirm-modal-detail");
+      if (detail && detail.length) {
+        detailEl.style.display = "block";
+        detailEl.innerHTML = detail.map(d =>
+          `<div class="row"><span class="label">${escapeHtml(d.label)}</span><span class="value">${escapeHtml(d.value)}</span></div>`
+        ).join("");
+      } else {
+        detailEl.style.display = "none";
+        detailEl.innerHTML = "";
+      }
+      const confirmBtn = document.getElementById("confirm-modal-confirm");
+      confirmBtn.textContent = confirmLabel || "Delete";
+      confirmCallback = onConfirm || null;
+      document.getElementById("confirm-modal-bg").classList.add("show");
+    }
+    function closeConfirm() {
+      document.getElementById("confirm-modal-bg").classList.remove("show");
+      confirmCallback = null;
+    }
+    document.getElementById("confirm-modal-close").addEventListener("click", closeConfirm);
+    document.getElementById("confirm-modal-cancel").addEventListener("click", closeConfirm);
+    document.getElementById("confirm-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "confirm-modal-bg") closeConfirm();
+    });
+    document.getElementById("confirm-modal-confirm").addEventListener("click", () => {
+      const cb = confirmCallback;
+      closeConfirm();
+      if (cb) cb();
+    });
+
+    /** Drop annotations + marker drafts for ids that no longer exist. */
+    function pruneLocalStateFor(ids) {
+      let stateChanged = false;
+      let markersChanged = false;
+      ids.forEach(id => {
+        if (state[id]) { delete state[id]; stateChanged = true; }
+        if (markers[id]) { delete markers[id]; markersChanged = true; }
+        selectedIds.delete(id);
+      });
+      if (stateChanged) saveState(state);
+      if (markersChanged) saveMarkers(markers);
+    }
+
+    /** Look up disk size for a record (from the last /api/disk poll). */
+    function diskSizeFor(id) {
+      const e = (diskState.by_record || []).find(x => x.id === id);
+      return e ? e.bytes : null;
+    }
+
+    function deleteRecordFlow(rec) {
+      const sizeBytes = diskSizeFor(rec.id);
+      const detail = [
+        { label: "Title", value: rec.title || "(no title)" },
+        { label: "Work dir", value: rec.work_dir || "(none)" },
+      ];
+      if (sizeBytes != null) detail.push({ label: "Disk size", value: fmtBytes(sizeBytes) });
+
+      openConfirm({
+        title: "Delete video?",
+        message: "Delete this record and the files in its work-dir.",
+        detail,
+        confirmLabel: "Delete",
+        onConfirm: () => doDeleteRecord(rec),
+      });
+    }
+
+    function doDeleteRecord(rec) {
+      if (SERVER_MODE) {
+        fetch(`/api/records/${encodeURIComponent(rec.id)}`, { method: "DELETE" })
+          .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); }))
+          .then(data => {
+            pruneLocalStateFor([rec.id]);
+            RECORDS = RECORDS.filter(x => x.id !== rec.id);
+            showToast(`Deleted — freed ${fmtBytes(data.freed_bytes || 0)}`);
+            fullRender();
+            refreshDisk();
+          })
+          .catch(err => {
+            const m = String(err.message || err);
+            if (m.includes("409") || m.includes("job in progress")) {
+              showToast("Cannot delete — job in progress. Wait or cancel first.");
+            } else if (m.includes("rmtree") || m.includes("locked")) {
+              showToast("Some files locked. Close any open previews and try again.");
+            } else {
+              showToast("Delete failed: " + m);
+            }
+          });
+      } else {
+        const cmd = `Remove-Item -Recurse -Force "${rec.work_dir}"`;
+        navigator.clipboard.writeText(cmd).then(
+          () => showToast("Command copied — paste in terminal. Refresh dashboard after."),
+          () => showToast("Couldn't copy — check clipboard permissions")
+        );
+      }
+    }
+
+    function bulkDeleteFlow() {
+      if (selectedIds.size === 0) return;
+      const ids = Array.from(selectedIds);
+      const totalBytes = ids.reduce((sum, id) => {
+        const v = diskSizeFor(id);
+        return sum + (v || 0);
+      }, 0);
+      const detail = [
+        { label: "Count", value: `${ids.length} videos` },
+        { label: "Estimated free", value: totalBytes > 0 ? fmtBytes(totalBytes) : "(server will report)" },
+      ];
+      openConfirm({
+        title: `Delete ${ids.length} videos?`,
+        message: "Bulk delete all selected records and their files.",
+        detail,
+        confirmLabel: `Delete ${ids.length}`,
+        onConfirm: () => doBulkDelete(ids),
+      });
+    }
+
+    function doBulkDelete(ids) {
+      if (!SERVER_MODE) {
+        // Fallback: single multi-line PowerShell command listing each work_dir.
+        const lines = ids.map(id => {
+          const r = RECORDS.find(x => x.id === id);
+          return r ? `Remove-Item -Recurse -Force "${r.work_dir}"` : null;
+        }).filter(Boolean);
+        navigator.clipboard.writeText(lines.join("\n")).then(
+          () => showToast(`${lines.length} commands copied — paste in terminal.`),
+          () => showToast("Couldn't copy")
+        );
+        return;
+      }
+      fetch("/api/records/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      })
+        .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); }))
+        .then(data => {
+          const okIds = data.results.filter(x => x.deleted).map(x => x.id);
+          const failed = data.results.filter(x => !x.deleted);
+          pruneLocalStateFor(okIds);
+          RECORDS = RECORDS.filter(x => !okIds.includes(x.id));
+          selectedIds.clear();
+          showToast(`Deleted ${okIds.length}/${data.results.length} — freed ${fmtBytes(data.total_freed_bytes || 0)}`);
+          if (failed.length) {
+            console.warn("bulk-delete failures:", failed);
+          }
+          fullRender();
+          refreshDisk();
+        })
+        .catch(err => showToast("Bulk delete failed: " + err.message));
+    }
+
+    function updateBulkBar() {
+      const bar = document.getElementById("bulk-bar");
+      const count = selectedIds.size;
+      if (!SERVER_MODE || count === 0) {
+        bar.classList.remove("show");
+        return;
+      }
+      bar.classList.add("show");
+      document.getElementById("bulk-count").textContent = `${count} selected`;
+      document.getElementById("bulk-delete-btn").textContent = `Delete ${count} selected`;
+    }
+
+    // Header "select all" — affects only currently filtered rows.
+    document.getElementById("select-all-rows").addEventListener("change", e => {
+      const checked = e.target.checked;
+      const visibleIds = Array.from(document.querySelectorAll("#rows tr"))
+        .map(tr => tr.dataset.id)
+        .filter(Boolean);
+      visibleIds.forEach(id => {
+        if (checked) selectedIds.add(id);
+        else selectedIds.delete(id);
+      });
+      // Update each row's checkbox without full re-render
+      document.querySelectorAll('#rows input[data-action="select-row"]').forEach(cb => {
+        cb.checked = checked;
+      });
+      updateBulkBar();
+    });
+
+    document.getElementById("bulk-clear").addEventListener("click", () => {
+      selectedIds.clear();
+      document.querySelectorAll('#rows input[data-action="select-row"]').forEach(cb => { cb.checked = false; });
+      document.getElementById("select-all-rows").checked = false;
+      updateBulkBar();
+    });
+    document.getElementById("bulk-delete-btn").addEventListener("click", bulkDeleteFlow);
+
+    // Hook into existing row event delegation for select-row + delete-record
+    document.getElementById("rows").addEventListener("change", e => {
+      if (e.target.dataset.action === "select-row") {
+        const tr = e.target.closest("tr");
+        if (!tr) return;
+        const id = tr.dataset.id;
+        if (e.target.checked) selectedIds.add(id);
+        else selectedIds.delete(id);
+        updateBulkBar();
+      }
+    });
+    document.getElementById("rows").addEventListener("click", e => {
+      if (e.target.dataset.action !== "delete-record") return;
+      const tr = e.target.closest("tr");
+      if (!tr) return;
+      const rec = RECORDS.find(r => r.id === tr.dataset.id);
+      if (rec) deleteRecordFlow(rec);
+    });
+
+    // ── Disk poll + breakdown modal ───────────────────────────────────────────
+
+    function refreshDisk() {
+      if (!SERVER_MODE) return;
+      fetch("/api/disk")
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(data => {
+          diskState.cache_total_bytes = data.cache_total_bytes || 0;
+          diskState.video_count = data.video_count || 0;
+          diskState.orphan_count = data.orphan_count || 0;
+          diskState.orphan_total_bytes = data.orphan_total_bytes || 0;
+          diskState.by_record = data.by_record || [];
+          renderStats();
+        })
+        .catch(() => { /* silent — connection indicator handles visibility */ });
+    }
+
+    if (SERVER_MODE) {
+      setTimeout(refreshDisk, 600);
+      setInterval(refreshDisk, 30000);
+    }
+
+    // Stats bar click → disk modal
+    document.getElementById("stats").addEventListener("click", e => {
+      const stat = e.target.closest("#cache-stat");
+      if (!stat || !SERVER_MODE) return;
+      openDiskModal();
+    });
+
+    function openDiskModal() {
+      const summary = document.getElementById("disk-summary");
+      const totalText = fmtBytes(diskState.cache_total_bytes);
+      const recText = `${diskState.video_count} record${diskState.video_count !== 1 ? "s" : ""}`;
+      const orphText = diskState.orphan_count > 0
+        ? `, plus ${diskState.orphan_count} orphan${diskState.orphan_count !== 1 ? "s" : ""} using ${fmtBytes(diskState.orphan_total_bytes)}`
+        : "";
+      summary.textContent = `${totalText} total · ${recText}${orphText}. Click a row to scroll to it in the table.`;
+      const tbody = document.getElementById("disk-rows");
+      const items = (diskState.by_record || []);
+      if (items.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px;">No records.</td></tr>`;
+      } else {
+        tbody.innerHTML = items.map(r =>
+          `<tr data-id="${escapeHtml(r.id || '')}">
+             <td>${escapeHtml(r.title || "(no title)")}</td>
+             <td class="size">${fmtBytes(r.bytes || 0)}</td>
+             <td class="id-col">${escapeHtml(r.id || '')}</td>
+           </tr>`
+        ).join("");
+      }
+      document.getElementById("disk-modal-bg").classList.add("show");
+    }
+    document.getElementById("disk-close").addEventListener("click", () => {
+      document.getElementById("disk-modal-bg").classList.remove("show");
+    });
+    document.getElementById("disk-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "disk-modal-bg") document.getElementById("disk-modal-bg").classList.remove("show");
+    });
+    document.getElementById("disk-rows").addEventListener("click", e => {
+      const tr = e.target.closest("tr[data-id]");
+      if (!tr) return;
+      const id = tr.dataset.id;
+      document.getElementById("disk-modal-bg").classList.remove("show");
+      const target = document.querySelector(`#rows tr[data-id="${id}"]`);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.classList.add("kbd-active");
+        setTimeout(() => target.classList.remove("kbd-active"), 1200);
+      }
+    });
+
+    // ── Orphan cleanup modal ──────────────────────────────────────────────────
+
+    const orphansState = { items: [], selected: new Set() };
+
+    function openOrphansModal() {
+      if (!SERVER_MODE) {
+        showToast("Server required to enumerate orphans");
+        return;
+      }
+      // Close projects modal first if it's open
+      document.getElementById("projects-modal-bg").classList.remove("show");
+      orphansState.items = [];
+      orphansState.selected.clear();
+      renderOrphans();
+      document.getElementById("orphans-modal-bg").classList.add("show");
+      fetch("/api/orphans")
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(data => {
+          orphansState.items = data.orphans || [];
+          renderOrphans();
+        })
+        .catch(err => {
+          document.getElementById("orphans-list").innerHTML =
+            `<li class="orphans-empty">Couldn't load orphans: ${escapeHtml(err.message)}</li>`;
+        });
+    }
+
+    function renderOrphans() {
+      const list = document.getElementById("orphans-list");
+      const summary = document.getElementById("orphans-summary");
+      const items = orphansState.items;
+      if (items.length === 0) {
+        list.innerHTML = `<li class="orphans-empty">No orphans found.</li>`;
+        summary.textContent = "";
+        return;
+      }
+      const totalBytes = items.reduce((a, x) => a + (x.size_bytes || 0), 0);
+      summary.textContent = `${items.length} orphan${items.length !== 1 ? "s" : ""} · ${fmtBytes(totalBytes)} total`;
+      list.innerHTML = items.map(o => {
+        const checked = orphansState.selected.has(o.name) ? "checked" : "";
+        const date = o.modified_at ? o.modified_at.replace("T", " ").replace(/\+.*$/, "") : "—";
+        return `<li data-name="${escapeHtml(o.name)}">
+          <input type="checkbox" data-action="orph-select" ${checked}>
+          <div class="orphan-info">
+            <div class="name">${escapeHtml(o.name)}</div>
+            <div class="meta">modified ${escapeHtml(date)}</div>
+          </div>
+          <div class="orphan-size">${fmtBytes(o.size_bytes || 0)}</div>
+        </li>`;
+      }).join("");
+    }
+
+    document.getElementById("orphans-list").addEventListener("change", e => {
+      if (e.target.dataset.action !== "orph-select") return;
+      const li = e.target.closest("li");
+      if (!li) return;
+      const name = li.dataset.name;
+      if (e.target.checked) orphansState.selected.add(name);
+      else orphansState.selected.delete(name);
+    });
+
+    document.getElementById("orphans-select-all").addEventListener("click", () => {
+      const allSelected = orphansState.selected.size === orphansState.items.length && orphansState.items.length > 0;
+      orphansState.selected.clear();
+      if (!allSelected) orphansState.items.forEach(o => orphansState.selected.add(o.name));
+      renderOrphans();
+    });
+
+    document.getElementById("orphans-delete").addEventListener("click", () => {
+      if (orphansState.selected.size === 0) {
+        showToast("Nothing selected");
+        return;
+      }
+      const names = Array.from(orphansState.selected);
+      const totalBytes = orphansState.items
+        .filter(o => orphansState.selected.has(o.name))
+        .reduce((a, x) => a + (x.size_bytes || 0), 0);
+      openConfirm({
+        title: `Delete ${names.length} orphan${names.length !== 1 ? "s" : ""}?`,
+        message: "Removes these directories from disk.",
+        detail: [
+          { label: "Count", value: `${names.length}` },
+          { label: "Estimated free", value: fmtBytes(totalBytes) },
+        ],
+        confirmLabel: `Delete ${names.length}`,
+        onConfirm: () => doOrphanDelete(names),
+      });
+    });
+
+    function doOrphanDelete(names) {
+      let succeeded = 0;
+      let totalFreed = 0;
+      let pending = names.length;
+      names.forEach(name => {
+        fetch(`/api/orphans/${encodeURIComponent(name)}`, { method: "DELETE" })
+          .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); }))
+          .then(data => {
+            succeeded++;
+            totalFreed += data.freed_bytes || 0;
+            orphansState.items = orphansState.items.filter(o => o.name !== name);
+            orphansState.selected.delete(name);
+          })
+          .catch(err => {
+            console.warn(`orphan delete ${name} failed:`, err);
+          })
+          .finally(() => {
+            pending--;
+            if (pending === 0) {
+              showToast(`Deleted ${succeeded}/${names.length} orphans · freed ${fmtBytes(totalFreed)}`);
+              renderOrphans();
+              refreshDisk();
+            }
+          });
+      });
+    }
+
+    document.getElementById("orphans-close").addEventListener("click", () => {
+      document.getElementById("orphans-modal-bg").classList.remove("show");
+    });
+    document.getElementById("orphans-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "orphans-modal-bg") document.getElementById("orphans-modal-bg").classList.remove("show");
+    });
+
+    // Wire "Cleanup orphans" button in the projects modal
+    const orphansBtn = document.getElementById("orphans-open-btn");
+    if (orphansBtn) {
+      if (!SERVER_MODE) {
+        orphansBtn.disabled = true;
+        orphansBtn.title = "Server required to enumerate orphans";
+      } else {
+        orphansBtn.addEventListener("click", openOrphansModal);
+      }
     }
 
     fullRender();

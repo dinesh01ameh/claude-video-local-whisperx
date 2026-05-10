@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -403,6 +404,145 @@ def _safe_join(base: Path, requested: str) -> Path:
 
 # ─── Manifest data ───────────────────────────────────────────────────────────
 
+# ─── Phase 7: delete / orphan / disk helpers ─────────────────────────────────
+
+# Files in .watch-cache/ that are NOT video work-dirs and must never be
+# enumerated as orphans or rmtree'd.
+PROTECTED_CACHE_NAMES = {
+    "index.json", "dashboard.html",
+    "server.log", "server.log.1", "server.log.2",
+}
+
+ORPHAN_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _dir_size(path: Path) -> int:
+    """Recursive sum of file sizes under `path`. Missing/locked files counted as 0."""
+    total = 0
+    try:
+        for p in path.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+def _is_active_workdir(work_dir_str: str) -> bool:
+    """True if any in-flight job is touching this work_dir.
+
+    Focused jobs carry a `work_dir` field (set in _new_job). Preview jobs don't
+    target an existing work_dir — they create a new one — so they can't conflict
+    with a delete of an *existing* record.
+    """
+    target = Path(work_dir_str).resolve()
+    with JOBS_LOCK:
+        for job in JOBS.values():
+            if job.get("status") not in {"queued", "extracting", "synthesizing"}:
+                continue
+            wd = job.get("work_dir")
+            if not wd:
+                continue
+            try:
+                if Path(wd).resolve() == target:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _validate_workdir_under_cache(work_dir: str) -> Path:
+    """Resolve `work_dir` and verify it's a *direct subdir* of .watch-cache/.
+
+    Defends against path-injection — even if a manifest entry were tampered
+    with, we never rmtree anything outside the cache.
+    """
+    if not work_dir:
+        raise HTTPException(400, "record has no work_dir")
+    p = Path(work_dir).expanduser().resolve()
+    cache_resolved = CACHE_DIR.resolve()
+    try:
+        rel = p.relative_to(cache_resolved)
+    except ValueError:
+        raise HTTPException(403, f"work_dir not under .watch-cache/: {work_dir}")
+    if len(rel.parts) != 1:
+        raise HTTPException(403, f"work_dir must be a direct subdir of .watch-cache/: {work_dir}")
+    return p
+
+
+def _read_manifest_records() -> list[dict]:
+    if not MANIFEST_PATH.exists():
+        return []
+    try:
+        data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _write_manifest_records(records: list[dict]) -> None:
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MANIFEST_PATH.write_text(
+        json.dumps(records, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _delete_record_by_id(rid: str, records: list[dict]) -> tuple[dict, int]:
+    """Mutates `records` (drops the matching entry) and rmtree's the work_dir.
+
+    Returns (deleted_record, freed_bytes). Raises HTTPException on validation
+    or filesystem errors.
+    """
+    idx = next((i for i, r in enumerate(records) if r.get("id") == rid), None)
+    if idx is None:
+        raise HTTPException(404, f"record not found: {rid}")
+    rec = records[idx]
+    work_dir = rec.get("work_dir") or ""
+    if _is_active_workdir(work_dir):
+        raise HTTPException(409, f"cannot delete — job in progress on {rid}")
+    work_path = _validate_workdir_under_cache(work_dir)
+
+    freed = _dir_size(work_path) if work_path.exists() else 0
+    if work_path.exists():
+        try:
+            shutil.rmtree(work_path, ignore_errors=False)
+        except OSError as exc:
+            raise HTTPException(500, f"rmtree failed: {exc}")
+
+    del records[idx]
+    return rec, freed
+
+
+def _list_orphans(record_ids: set[str]) -> list[dict]:
+    out: list[dict] = []
+    if not CACHE_DIR.exists():
+        return out
+    for entry in CACHE_DIR.iterdir():
+        if entry.name in PROTECTED_CACHE_NAMES:
+            continue
+        if not entry.is_dir():
+            continue
+        if entry.name in record_ids:
+            continue
+        try:
+            stat = entry.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+        except OSError:
+            mtime = None
+        out.append({
+            "name": entry.name,
+            "path": str(entry),
+            "size_bytes": _dir_size(entry),
+            "modified_at": mtime,
+        })
+    out.sort(key=lambda o: o.get("modified_at") or "", reverse=True)
+    return out
+
+
 def _load_manifest_data() -> dict[str, Any]:
     """Return the same shape dashboard.py embeds at render time."""
     if MANIFEST_PATH.exists():
@@ -614,6 +754,126 @@ def api_job_status(job_id: str):
             "result": job.get("result"),
             "auto_synthesize": job.get("auto_synthesize"),
         }
+
+
+@app.delete("/api/records/{rid}")
+def api_record_delete(rid: str):
+    records = _read_manifest_records()
+    rec, freed = _delete_record_by_id(rid, records)
+    _write_manifest_records(records)
+    try:
+        render_dashboard(MANIFEST_PATH, DASHBOARD_PATH)
+    except Exception:
+        logger.exception("dashboard regen after delete failed (non-fatal)")
+    logger.info("deleted record %s, freed %d bytes", rid, freed)
+    return {"deleted": True, "id": rid, "freed_bytes": freed}
+
+
+@app.post("/api/records/bulk-delete")
+async def api_records_bulk_delete(req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(400, "ids must be an array of strings")
+
+    records = _read_manifest_records()
+    results = []
+    total_freed = 0
+    for rid in ids:
+        try:
+            _rec, freed = _delete_record_by_id(rid, records)
+            total_freed += freed
+            results.append({"id": rid, "deleted": True, "error": None, "freed_bytes": freed})
+        except HTTPException as exc:
+            results.append({"id": rid, "deleted": False, "error": str(exc.detail), "freed_bytes": 0})
+        except Exception as exc:
+            logger.exception("bulk delete: unexpected failure for %s", rid)
+            results.append({"id": rid, "deleted": False, "error": str(exc), "freed_bytes": 0})
+
+    # Atomic write — single manifest update at the end of the batch.
+    _write_manifest_records(records)
+    try:
+        render_dashboard(MANIFEST_PATH, DASHBOARD_PATH)
+    except Exception:
+        logger.exception("dashboard regen after bulk-delete failed (non-fatal)")
+    logger.info("bulk-delete: %d/%d ok, freed %d bytes", sum(1 for r in results if r["deleted"]), len(results), total_freed)
+    return {"results": results, "total_freed_bytes": total_freed}
+
+
+@app.get("/api/orphans")
+def api_orphans():
+    records = _read_manifest_records()
+    record_ids = {str(r.get("id")) for r in records if r.get("id")}
+    return {"orphans": _list_orphans(record_ids)}
+
+
+@app.delete("/api/orphans/{name}")
+def api_orphan_delete(name: str):
+    if not ORPHAN_NAME_RE.match(name):
+        raise HTTPException(400, "invalid orphan name")
+    if name in PROTECTED_CACHE_NAMES:
+        raise HTTPException(403, "name is protected")
+    target = (CACHE_DIR / name).resolve()
+    cache_resolved = CACHE_DIR.resolve()
+    try:
+        rel = target.relative_to(cache_resolved)
+    except ValueError:
+        raise HTTPException(403, "path escapes cache root")
+    if len(rel.parts) != 1:
+        raise HTTPException(403, "must be a direct subdir of .watch-cache/")
+    # Must not be in the active manifest (would be a real record, not an orphan)
+    records = _read_manifest_records()
+    if any(r.get("id") == name for r in records):
+        raise HTTPException(409, "name corresponds to a manifest record — use DELETE /api/records/{id} instead")
+    if not target.exists():
+        raise HTTPException(404, f"not found: {name}")
+    if not target.is_dir():
+        raise HTTPException(403, "not a directory")
+    freed = _dir_size(target)
+    try:
+        shutil.rmtree(target, ignore_errors=False)
+    except OSError as exc:
+        raise HTTPException(500, f"rmtree failed: {exc}")
+    logger.info("deleted orphan %s, freed %d bytes", name, freed)
+    return {"deleted": True, "name": name, "freed_bytes": freed}
+
+
+@app.get("/api/disk")
+def api_disk():
+    records = _read_manifest_records()
+    record_ids = {str(r.get("id")) for r in records if r.get("id")}
+    by_record = []
+    cache_total = 0
+    for r in records:
+        wd = r.get("work_dir")
+        if not wd:
+            continue
+        try:
+            wp = Path(wd).expanduser().resolve()
+            wp.relative_to(CACHE_DIR.resolve())
+        except (ValueError, OSError):
+            continue
+        size = _dir_size(wp) if wp.exists() else 0
+        cache_total += size
+        by_record.append({
+            "id": r.get("id"),
+            "title": r.get("title"),
+            "bytes": size,
+            "work_dir": wd,
+        })
+    by_record.sort(key=lambda x: x.get("bytes", 0), reverse=True)
+    orphans = _list_orphans(record_ids)
+    orphan_total = sum(o.get("size_bytes", 0) for o in orphans)
+    return {
+        "cache_total_bytes": cache_total + orphan_total,
+        "video_count": len(by_record),
+        "orphan_count": len(orphans),
+        "orphan_total_bytes": orphan_total,
+        "by_record": by_record,
+    }
 
 
 @app.get("/api/health")
