@@ -137,6 +137,54 @@ def _load_focused_results(records: list[dict]) -> dict[str, str]:
     return out
 
 
+def _load_variant_summaries(records: list[dict]) -> dict[str, dict[str, str]]:
+    """For each record, load nlm-summary-variant-a/b.md if present.
+
+    Mirrors _load_summaries but returns {record_id: {slot: text}} so the
+    Compare modal can show multiple summaries side-by-side. Same 80 KB cap.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for rec in records:
+        rid = rec.get("id")
+        work = rec.get("work_dir")
+        if not rid or not work:
+            continue
+        for slot in ("variant-a", "variant-b"):
+            p = Path(work) / f"nlm-summary-{slot}.md"
+            if not p.exists():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+                if len(text) > 80_000:
+                    text = text[:80_000] + "\n\n…[truncated]"
+                out.setdefault(rid, {})[slot] = text
+            except OSError:
+                continue
+    return out
+
+
+def _load_variant_focused_results(records: list[dict]) -> dict[str, dict[str, str]]:
+    """Slot-suffixed focused-result.md companion to _load_variant_summaries."""
+    out: dict[str, dict[str, str]] = {}
+    for rec in records:
+        rid = rec.get("id")
+        work = rec.get("work_dir")
+        if not rid or not work:
+            continue
+        for slot in ("variant-a", "variant-b"):
+            p = Path(work) / f"focused-result-{slot}.md"
+            if not p.exists():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+                if len(text) > 80_000:
+                    text = text[:80_000] + "\n\n…[truncated]"
+                out.setdefault(rid, {})[slot] = text
+            except OSError:
+                continue
+    return out
+
+
 def _load_previews(records: list[dict]) -> dict[str, dict]:
     """For preview-ready records, load <work_dir>/preview.json so the marker UI
     can render the timeline strip and transcript without a network round-trip
@@ -183,6 +231,8 @@ def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
     records = sorted(records, key=lambda r: r.get("started_at") or "", reverse=True)
     summaries = _load_summaries(records)
     focused_results = _load_focused_results(records)
+    variant_summaries = _load_variant_summaries(records)
+    variant_focused_results = _load_variant_focused_results(records)
     previews = _load_previews(records)
     # preview.json content carries its own sandbox paths inside sparse_frames[*].path;
     # rewrite them so the marker timeline's <img> tags resolve on the host.
@@ -211,6 +261,8 @@ def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
     data_json = json.dumps(records, ensure_ascii=False)
     summaries_json = json.dumps(summaries, ensure_ascii=False)
     focused_results_json = json.dumps(focused_results, ensure_ascii=False)
+    variant_summaries_json = json.dumps(variant_summaries, ensure_ascii=False)
+    variant_focused_results_json = json.dumps(variant_focused_results, ensure_ascii=False)
     previews_json = json.dumps(previews, ensure_ascii=False)
     tags_json = json.dumps(PROJECT_TAGS, ensure_ascii=False)
     script_path_json = json.dumps(str(script_path), ensure_ascii=False)
@@ -221,6 +273,8 @@ def render_dashboard(manifest_path: Path, dashboard_path: Path) -> None:
         .replace("{{DATA}}", data_json)
         .replace("{{SUMMARIES}}", summaries_json)
         .replace("{{FOCUSED_RESULTS}}", focused_results_json)
+        .replace("{{VARIANT_SUMMARIES}}", variant_summaries_json)
+        .replace("{{VARIANT_FOCUSED_RESULTS}}", variant_focused_results_json)
         .replace("{{PREVIEWS}}", previews_json)
         .replace("{{PROJECT_TAGS}}", tags_json)
         .replace("{{SCRIPT_PATH}}", script_path_json)
@@ -944,6 +998,96 @@ HTML_TEMPLATE = r"""<!doctype html>
     .disk-table td.id-col {
       color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px;
     }
+
+    /* Phase 11: variant slots — Send-button popover + Compare modal */
+    .marker-send-group {
+      position: relative; display: inline-flex; gap: 4px; align-items: center;
+    }
+    .marker-variant-caret {
+      background: var(--accent); color: var(--bg); border: none;
+      padding: 8px 10px; border-radius: 4px; font: 13px inherit; cursor: pointer;
+      font-weight: 600;
+    }
+    .marker-variant-caret:hover { filter: brightness(1.1); }
+    .marker-variant-caret[hidden] { display: none; }
+    .marker-variant-menu {
+      position: absolute; bottom: calc(100% + 4px); right: 0; z-index: 105;
+      background: var(--panel); border: 1px solid var(--accent);
+      border-radius: 5px; padding: 4px; display: flex; flex-direction: column;
+      gap: 2px; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    .marker-variant-menu[hidden] { display: none; }
+    .marker-variant-menu button {
+      background: none; border: none; color: var(--text); padding: 7px 12px;
+      text-align: left; cursor: pointer; font: 12px inherit; border-radius: 3px;
+    }
+    .marker-variant-menu button:hover { background: var(--accent-soft); }
+    .marker-variant-menu .variant-menu-hint {
+      padding: 4px 12px 2px; font-size: 10px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    .actions button.compare-btn { color: var(--accent); font-weight: 500; }
+    .actions button.compare-btn:hover { text-decoration: underline; }
+    .actions .variant-count {
+      font-size: 10px; color: var(--muted); margin-right: 4px;
+    }
+
+    .compare-modal { max-width: 95vw; width: 95vw; max-height: 92vh; }
+    .compare-modal .modal-head { gap: 14px; flex-wrap: wrap; }
+    .compare-modal .modal-body { padding: 14px; }
+    .compare-toggle {
+      font-size: 11px; color: var(--muted); display: inline-flex;
+      align-items: center; gap: 6px; cursor: pointer; user-select: none;
+    }
+    .compare-toggle input[type=checkbox] {
+      width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer;
+    }
+    .compare-columns {
+      display: grid; gap: 12px; height: 100%;
+    }
+    .compare-columns.cols-1 { grid-template-columns: 1fr; }
+    .compare-columns.cols-2 { grid-template-columns: 1fr 1fr; }
+    .compare-columns.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .compare-col {
+      display: flex; flex-direction: column; min-width: 0;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: var(--panel); max-height: calc(92vh - 140px);
+    }
+    .compare-col-head {
+      padding: 10px 12px; border-bottom: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .compare-col-name { font-weight: 600; color: var(--text); font-size: 13px; }
+    .compare-badge {
+      font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace;
+    }
+    .compare-col-body {
+      flex: 1; overflow-y: auto; padding: 10px 14px; margin: 0;
+      background: var(--bg); border: none;
+      font: 12.5px/1.55 ui-monospace, Menlo, Consolas, monospace; color: var(--text);
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .compare-col-body.empty { color: var(--muted); font-style: italic; }
+    .compare-col-foot {
+      padding: 8px 12px; border-top: 1px solid var(--border);
+      display: flex; gap: 8px; justify-content: flex-end;
+    }
+    .compare-col-foot button {
+      background: var(--bg); color: var(--accent); border: 1px solid var(--border);
+      padding: 5px 12px; border-radius: 4px; cursor: pointer; font: 11px inherit;
+    }
+    .compare-col-foot button:hover { border-color: var(--accent); }
+    .compare-col-foot button.del { color: var(--muted); }
+    .compare-col-foot button.del:hover { color: var(--red); border-color: var(--red); }
+    @media (max-width: 1100px) {
+      .compare-columns.cols-3 { grid-template-columns: 1fr 1fr; }
+      .compare-columns.cols-3 .compare-col:last-child { grid-column: 1 / -1; }
+    }
+    @media (max-width: 700px) {
+      .compare-columns.cols-2, .compare-columns.cols-3 { grid-template-columns: 1fr; }
+      .compare-columns.cols-3 .compare-col:last-child { grid-column: auto; }
+    }
   </style>
 </head>
 <body>
@@ -1126,7 +1270,32 @@ HTML_TEMPLATE = r"""<!doctype html>
           <input type="checkbox" id="auto-synth-checkbox" checked>
           <span>Auto-synthesize</span>
         </label>
-        <button id="marker-copy" class="primary">Copy /watch --focused command</button>
+        <div class="marker-send-group">
+          <button id="marker-copy" class="primary">Copy /watch --focused command</button>
+          <button id="marker-variant-btn" class="marker-variant-caret" title="Save as a variant slot (A/B comparison)" hidden>▾</button>
+          <div class="marker-variant-menu" id="marker-variant-menu" hidden>
+            <div class="variant-menu-hint">Save to slot</div>
+            <button data-variant="variant-a">Save as Variant A</button>
+            <button data-variant="variant-b">Save as Variant B</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compare-variants modal (Phase 11) -->
+  <div class="modal-bg" id="compare-modal-bg">
+    <div class="modal compare-modal">
+      <div class="modal-head">
+        <h2 id="compare-modal-title">Compare variants</h2>
+        <label class="compare-toggle">
+          <input type="checkbox" id="compare-show-result">
+          Show focused-result instead of NLM summary
+        </label>
+        <button id="compare-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="compare-columns" id="compare-columns"></div>
       </div>
     </div>
   </div>
@@ -1257,6 +1426,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     let RECORDS = {{DATA}};
     let SUMMARIES = {{SUMMARIES}};
     let FOCUSED_RESULTS = {{FOCUSED_RESULTS}};
+    let VARIANT_SUMMARIES = {{VARIANT_SUMMARIES}};
+    let VARIANT_FOCUSED_RESULTS = {{VARIANT_FOCUSED_RESULTS}};
     let PREVIEWS = {{PREVIEWS}};
     const PROJECT_TAGS_SEED = {{PROJECT_TAGS}};
     const SCRIPT_PATH = {{SCRIPT_PATH}};
@@ -1590,6 +1761,16 @@ HTML_TEMPLATE = r"""<!doctype html>
         const hasResult = !!FOCUSED_RESULTS[r.id];
         const hasPreview = !!PREVIEWS[r.id];
         const isMarkable = (status === "preview-ready" || status === "focused-ready") && hasPreview;
+        // Phase 11: which slots (main + variants) have any saved content?
+        const vSummaries = VARIANT_SUMMARIES[r.id] || {};
+        const vFocused = VARIANT_FOCUSED_RESULTS[r.id] || {};
+        const slotsPresent = [];
+        if (hasNlm || hasResult) slotsPresent.push("main");
+        for (const slot of ["variant-a", "variant-b"]) {
+          if (vSummaries[slot] || vFocused[slot]) slotsPresent.push(slot);
+        }
+        const variantCount = slotsPresent.filter(s => s !== "main").length;
+        const showCompare = slotsPresent.length >= 2;
 
         // Project dropdown — projects come from localStorage (with seed fallback).
         // Always include the user's current tag even if it's been removed from the project list,
@@ -1613,6 +1794,10 @@ HTML_TEMPLATE = r"""<!doctype html>
         }
         if (hasResult) actionParts.push(`<button data-action="preview-result" title="Read the long-form focused result">Result</button>`);
         if (hasNlm) actionParts.push(`<button data-action="preview-nlm" title="Preview the NLM-ready summary">NLM</button>`);
+        if (showCompare) {
+          const vTag = variantCount > 0 ? `<span class="variant-count">(${variantCount}v)</span>` : "";
+          actionParts.push(`${vTag}<button data-action="compare" class="compare-btn" title="Side-by-side comparison of main and variants">Compare</button>`);
+        }
         actionParts.push(`<button data-action="copy-rerun" title="Copy re-run command to clipboard">re-run</button>`);
         actionParts.push(`<button data-action="delete-record" class="del-btn" title="Delete this record and its files">delete</button>`);
 
@@ -1677,6 +1862,10 @@ HTML_TEMPLATE = r"""<!doctype html>
       }
       if (action === "mark") {
         openMarker(id);
+        return;
+      }
+      if (action === "compare") {
+        openCompareModal(id);
         return;
       }
       if (action === "preview-nlm") {
@@ -1779,6 +1968,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function closeMarker() {
       document.getElementById("marker-modal-bg").classList.remove("show");
+      const vMenu = document.getElementById("marker-variant-menu");
+      if (vMenu) vMenu.hidden = true;
       if (markerVideo) { try { markerVideo.pause(); } catch {} }
       stopPlayheadLoop();
       markerCurrentId = null;
@@ -2277,9 +2468,10 @@ HTML_TEMPLATE = r"""<!doctype html>
       renderMarkerSegments();
     });
 
-    // Copy /watch --focused command — or, in server mode, send to the server
-    // which spawns the subprocess and writes focused-report.md.
-    document.getElementById("marker-copy").addEventListener("click", () => {
+    // Send focused job — server mode posts to /api/focused; static mode falls
+    // back to copying the CLI command. Phase 11: `variant` routes output to a
+    // slot (main / variant-a / variant-b) so users can A/B compare results.
+    function sendFocused(variant) {
       if (!markerCurrentId) return;
       const rec = RECORDS.find(r => r.id === markerCurrentId);
       if (!rec) return;
@@ -2294,6 +2486,8 @@ HTML_TEMPLATE = r"""<!doctype html>
         const review = (draft.review || "").replace(/[\r\n]+/g, " ").trim();
         const autoSynthCheckbox = document.getElementById("auto-synth-checkbox");
         const autoSynthesize = !!(claudeState.available && autoSynthCheckbox && autoSynthCheckbox.checked);
+        const slotLabel = variant === "variant-a" ? " → Variant A"
+                        : variant === "variant-b" ? " → Variant B" : "";
         fetch("/api/focused", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2302,6 +2496,7 @@ HTML_TEMPLATE = r"""<!doctype html>
             segments,
             user_review: review,
             auto_synthesize: autoSynthesize,
+            variant,
           }),
         }).then(r => {
           if (!r.ok) return r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); });
@@ -2310,23 +2505,49 @@ HTML_TEMPLATE = r"""<!doctype html>
           closeMarker();
           openJobModal(
             data.job_id,
-            autoSynthesize ? "Focused extraction + synthesis" : "Focused extraction",
+            (autoSynthesize ? "Focused extraction + synthesis" : "Focused extraction") + slotLabel,
             autoSynthesize
               ? "Phase 1/2 starting — extraction; phase 2/2 chains Claude Code synthesis."
               : "Extracting marked frames and filtering transcript…",
-            { focused_report_path: data.focused_report_path, rec_id: rec.id, auto_synthesize: autoSynthesize }
+            { focused_report_path: data.focused_report_path, rec_id: rec.id, auto_synthesize: autoSynthesize, variant }
           );
         }).catch(err => {
           showToast("Server rejected focused job: " + err.message);
         });
       } else {
+        // Static mode: variant slots aren't supported (server required). Fall
+        // back to copying the main command — user can re-run with env tweaks.
         const cmd = buildFocusedCommand(rec);
         navigator.clipboard.writeText(cmd).then(
           () => showToast("Focused command copied — paste into Claude Code to process"),
           () => showToast("Couldn't copy — check clipboard permissions")
         );
       }
-    });
+    }
+
+    document.getElementById("marker-copy").addEventListener("click", () => sendFocused("main"));
+
+    // Variant menu (popover above the Send button) — server mode only.
+    const variantBtn = document.getElementById("marker-variant-btn");
+    const variantMenu = document.getElementById("marker-variant-menu");
+    if (variantBtn) {
+      variantBtn.addEventListener("click", e => {
+        e.stopPropagation();
+        variantMenu.hidden = !variantMenu.hidden;
+      });
+      variantMenu.addEventListener("click", e => {
+        const slot = e.target.dataset.variant;
+        if (!slot) return;
+        variantMenu.hidden = true;
+        sendFocused(slot);
+      });
+      // Click-outside closes the popover.
+      document.addEventListener("click", e => {
+        if (variantMenu.hidden) return;
+        if (e.target.closest("#marker-variant-menu") || e.target === variantBtn) return;
+        variantMenu.hidden = true;
+      });
+    }
 
     // Filter wiring + persistence
     function bindFilter(elId, setter) {
@@ -2391,7 +2612,128 @@ HTML_TEMPLATE = r"""<!doctype html>
         document.getElementById("confirm-modal-bg").classList.remove("show");
         document.getElementById("orphans-modal-bg").classList.remove("show");
         document.getElementById("disk-modal-bg").classList.remove("show");
+        closeCompareModal();
         closeMarker();
+      }
+    });
+
+    // ── Compare-variants modal (Phase 11) ────────────────────────────────────
+    let compareCurrentId = null;
+    let compareShowResult = false;
+
+    function compareSlotsFor(id) {
+      const vSummaries = VARIANT_SUMMARIES[id] || {};
+      const vFocused = VARIANT_FOCUSED_RESULTS[id] || {};
+      const slots = [];
+      if (SUMMARIES[id] || FOCUSED_RESULTS[id]) slots.push("main");
+      for (const slot of ["variant-a", "variant-b"]) {
+        if (vSummaries[slot] || vFocused[slot]) slots.push(slot);
+      }
+      return slots;
+    }
+
+    function openCompareModal(id) {
+      const rec = RECORDS.find(r => r.id === id);
+      if (!rec) return;
+      compareCurrentId = id;
+      document.getElementById("compare-modal-title").textContent =
+        `Compare variants — ${rec.title || rec.id}`;
+      document.getElementById("compare-show-result").checked = compareShowResult;
+      renderCompareColumns();
+      document.getElementById("compare-modal-bg").classList.add("show");
+    }
+
+    function closeCompareModal() {
+      document.getElementById("compare-modal-bg").classList.remove("show");
+      compareCurrentId = null;
+    }
+
+    function renderCompareColumns() {
+      if (!compareCurrentId) return;
+      const id = compareCurrentId;
+      const rec = RECORDS.find(r => r.id === id);
+      if (!rec) { closeCompareModal(); return; }
+      const variants = rec.variants || {};
+      const vSummaries = VARIANT_SUMMARIES[id] || {};
+      const vFocused = VARIANT_FOCUSED_RESULTS[id] || {};
+      const slots = compareSlotsFor(id);
+      const cols = document.getElementById("compare-columns");
+      cols.classList.remove("cols-1", "cols-2", "cols-3");
+      cols.classList.add(`cols-${Math.min(slots.length, 3)}`);
+
+      const labelFor = s => s === "main" ? "Main"
+                          : s === "variant-a" ? "Variant A" : "Variant B";
+
+      cols.innerHTML = slots.map(slot => {
+        const isMain = slot === "main";
+        const meta = variants[slot];
+        const ts = meta && meta.saved_at
+          ? meta.saved_at.replace("T", " ").replace(/\+.*$/, "")
+          : "";
+        const badge = meta
+          ? `${meta.model || "?"} · ${meta.effort || "?"}${ts ? " · " + ts : ""}`
+          : "(no metadata)";
+        const content = compareShowResult
+          ? (isMain ? (FOCUSED_RESULTS[id] || "") : (vFocused[slot] || ""))
+          : (isMain ? (SUMMARIES[id] || "") : (vSummaries[slot] || ""));
+        const fileLabel = compareShowResult ? "focused-result" : "nlm-summary";
+        const bodyClass = content ? "compare-col-body" : "compare-col-body empty";
+        const bodyText = content || `(no ${fileLabel} for this slot)`;
+        const delBtn = isMain
+          ? ""
+          : `<button data-action="compare-delete" data-slot="${slot}" class="del">Delete</button>`;
+        return `<div class="compare-col" data-slot="${slot}">
+          <div class="compare-col-head">
+            <span class="compare-col-name">${labelFor(slot)}</span>
+            <span class="compare-badge">${escapeHtml(badge)}</span>
+          </div>
+          <pre class="${bodyClass}">${escapeHtml(bodyText)}</pre>
+          <div class="compare-col-foot">
+            <button data-action="compare-copy" data-slot="${slot}">Copy</button>
+            ${delBtn}
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    document.getElementById("compare-close").addEventListener("click", closeCompareModal);
+    document.getElementById("compare-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "compare-modal-bg") closeCompareModal();
+    });
+    document.getElementById("compare-show-result").addEventListener("change", e => {
+      compareShowResult = !!e.target.checked;
+      renderCompareColumns();
+    });
+    document.getElementById("compare-columns").addEventListener("click", e => {
+      const action = e.target.dataset.action;
+      if (!action) return;
+      const slot = e.target.dataset.slot;
+      if (action === "compare-copy") {
+        const col = e.target.closest(".compare-col");
+        if (!col) return;
+        const text = col.querySelector(".compare-col-body").textContent;
+        navigator.clipboard.writeText(text).then(
+          () => showToast(`Copied ${slot === "main" ? "Main" : (slot === "variant-a" ? "Variant A" : "Variant B")}`),
+          () => showToast("Couldn't copy — check clipboard permissions")
+        );
+      } else if (action === "compare-delete") {
+        if (!compareCurrentId || slot === "main") return;
+        if (!SERVER_MODE) { showToast("Server required to delete variants"); return; }
+        const slotLabel = slot === "variant-a" ? "Variant A" : "Variant B";
+        if (!confirm(`Delete ${slotLabel}? This removes its output files and metadata. Cannot be undone.`)) return;
+        fetch(`/api/records/${encodeURIComponent(compareCurrentId)}/variants/${slot}`, { method: "DELETE" })
+          .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); }))
+          .then(() => {
+            showToast(`Deleted ${slotLabel}`);
+            refreshManifest();
+            // Re-render after manifest update; close if fewer than 2 slots remain.
+            setTimeout(() => {
+              if (!compareCurrentId) return;
+              if (compareSlotsFor(compareCurrentId).length < 2) closeCompareModal();
+              else renderCompareColumns();
+            }, 800);
+          })
+          .catch(err => showToast("Delete failed: " + err.message));
       }
     });
 
@@ -2745,12 +3087,15 @@ HTML_TEMPLATE = r"""<!doctype html>
       const toggle = document.getElementById("auto-synth-toggle");
       const checkbox = document.getElementById("auto-synth-checkbox");
       const btn = document.getElementById("marker-copy");
+      const vBtn = document.getElementById("marker-variant-btn");
       if (!SERVER_MODE) {
         toggle.classList.remove("show");
         if (btn) btn.textContent = "Copy /watch --focused command";
+        if (vBtn) vBtn.hidden = true;
         return;
       }
       toggle.classList.add("show");
+      if (vBtn) vBtn.hidden = false;
       if (claudeState.available) {
         checkbox.disabled = false;
         toggle.classList.remove("disabled");
@@ -2867,6 +3212,8 @@ HTML_TEMPLATE = r"""<!doctype html>
           if (Array.isArray(data.records)) RECORDS = data.records;
           if (data.summaries) SUMMARIES = data.summaries;
           if (data.focused_results) FOCUSED_RESULTS = data.focused_results;
+          if (data.variant_summaries) VARIANT_SUMMARIES = data.variant_summaries;
+          if (data.variant_focused_results) VARIANT_FOCUSED_RESULTS = data.variant_focused_results;
           if (data.previews) PREVIEWS = data.previews;
           fullRender();
         })

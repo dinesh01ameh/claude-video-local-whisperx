@@ -54,6 +54,8 @@ from dashboard import (  # noqa: E402
     _load_focused_results,
     _load_previews,
     _load_summaries,
+    _load_variant_focused_results,
+    _load_variant_summaries,
     _normalize_paths,
     _rewrite_path,
     render_dashboard,
@@ -99,6 +101,24 @@ SYNTHESIS_TIMEOUT_SEC = int(os.environ.get("CLAUDE_SYNTHESIS_TIMEOUT_SEC", "600"
 # via CLAUDE_SYNTHESIS_MODEL / CLAUDE_SYNTHESIS_EFFORT to push toward quality.
 SYNTHESIS_MODEL = os.environ.get("CLAUDE_SYNTHESIS_MODEL", "sonnet")
 SYNTHESIS_EFFORT = os.environ.get("CLAUDE_SYNTHESIS_EFFORT", "low")
+
+# Phase 11: variant slots — up to 3 saved focused-output sets per record
+# (main + variant-a + variant-b) for side-by-side A/B comparison.
+VALID_VARIANTS = ("main", "variant-a", "variant-b")
+
+
+def _variant_filenames(variant: str) -> tuple[str, str]:
+    """Return (focused_result_filename, nlm_summary_filename) for a slot.
+
+    Main keeps the original filenames so existing manifests and the
+    dashboard's main-slot rendering stay untouched. Variant slots get a
+    suffix so A/B outputs live alongside main without manual renames.
+    """
+    if variant == "main":
+        return ("focused-result.md", "nlm-summary.md")
+    if variant in ("variant-a", "variant-b"):
+        return (f"focused-result-{variant}.md", f"nlm-summary-{variant}.md")
+    raise ValueError(f"unknown variant: {variant}")
 
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
@@ -251,17 +271,27 @@ def _spawn(
 
 # ─── Synthesis (Phase 6: chain `claude -p` after focused extraction) ─────────
 
-def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) -> None:
-    """Spawn `claude -p <prompt>` and wire it into the job's synthesis phase."""
+def _spawn_synthesis(
+    job_id: str,
+    work_path: Path,
+    focused_report_path: Path,
+    variant: str = "main",
+) -> None:
+    """Spawn `claude -p <prompt>` and wire it into the job's synthesis phase.
+
+    `variant` routes the output to slot-suffixed filenames (main keeps the
+    originals; variant-a/b get -variant-a.md / -variant-b.md suffixes).
+    """
     if not CLAUDE_BIN:
         _update_job(job_id, status="failed", error="claude CLI not on PATH")
         return
 
+    result_name, summary_name = _variant_filenames(variant)
     prompt = (
         "Apply the watch skill's focused-mode synthesis to the report at "
         f"{focused_report_path}. Read every frame path it lists, follow SKILL.md "
         "NLM template (Spoken content / Visual content / Synthesis sections), "
-        f"and save BOTH focused-result.md (verbose) and nlm-summary.md "
+        f"and save BOTH {result_name} (verbose) and {summary_name} "
         f"(NLM-paste version) to {work_path}. Confirm in one line when done."
     )
 
@@ -319,18 +349,18 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
     # [WROTE] events as soon as Claude saves each .md file via the Write tool.
     threading.Thread(
         target=_watch_synthesis_files,
-        args=(job_id, work_path),
+        args=(job_id, work_path, variant),
         daemon=True,
     ).start()
 
     def _verify_outputs(_lines: list[str]) -> None:
-        focused_result = work_path / "focused-result.md"
-        nlm_summary = work_path / "nlm-summary.md"
+        focused_result = work_path / result_name
+        nlm_summary = work_path / summary_name
         missing = []
         if not focused_result.exists():
-            missing.append("focused-result.md")
+            missing.append(result_name)
         if not nlm_summary.exists():
-            missing.append("nlm-summary.md")
+            missing.append(summary_name)
         if missing:
             _update_job(
                 job_id,
@@ -343,6 +373,14 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
                 ),
             )
             return
+        # Stamp the manifest record with this slot's model/effort/timestamp so
+        # the Compare modal can label each column with what produced it.
+        try:
+            _update_variant_metadata(
+                str(work_path), variant, SYNTHESIS_MODEL, SYNTHESIS_EFFORT
+            )
+        except Exception:
+            logger.exception("variant metadata update failed (non-fatal)")
         with JOBS_LOCK:
             job = JOBS.get(job_id)
             if job is None:
@@ -352,10 +390,11 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
             existing_result.update({
                 "focused_result_path": str(focused_result),
                 "nlm_summary_path": str(nlm_summary),
+                "variant": variant,
             })
             job["result"] = existing_result
         _update_job(job_id, status="done", phase=None)
-        logger.info("job %s synthesis verified", job_id)
+        logger.info("job %s synthesis verified (variant=%s)", job_id, variant)
 
     threading.Thread(
         target=_run_synthesis_with_timeout,
@@ -364,7 +403,7 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
     ).start()
 
 
-def _watch_synthesis_files(job_id: str, work_path: Path) -> None:
+def _watch_synthesis_files(job_id: str, work_path: Path, variant: str = "main") -> None:
     """Poll work_path for the two synthesis output files and surface [WROTE]
     lines into the synthesis log as they appear.
 
@@ -372,7 +411,7 @@ def _watch_synthesis_files(job_id: str, work_path: Path) -> None:
     away from 'synthesizing'), or after a 15-minute hard cap. Read-only —
     never touches the subprocess; complements _run_synthesis_with_timeout.
     """
-    targets = ("focused-result.md", "nlm-summary.md")
+    targets = _variant_filenames(variant)
     seen: set[str] = set()
     deadline = time.time() + 900  # 15 min hard cap, longer than synthesis timeout
     while time.time() < deadline:
@@ -641,6 +680,39 @@ def _write_manifest_records(records: list[dict]) -> None:
     )
 
 
+def _update_variant_metadata(work_dir: str, variant: str, model: str, effort: str) -> None:
+    """Stamp the manifest record (matched by work_dir) with this slot's metadata.
+
+    Called from `_verify_outputs` after a successful synthesis. The Compare
+    modal reads these badges to label each column with what produced it.
+    No-op if the record isn't in the manifest yet (e.g. mid-creation).
+    """
+    records = _read_manifest_records()
+    try:
+        target = Path(work_dir).resolve()
+    except OSError:
+        return
+    changed = False
+    for rec in records:
+        rwd = _rewrite_path(rec.get("work_dir") or "", PROJECT_DIR)
+        try:
+            if Path(rwd).resolve() != target:
+                continue
+        except OSError:
+            continue
+        variants = rec.get("variants") or {}
+        variants[variant] = {
+            "model": model,
+            "effort": effort,
+            "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        rec["variants"] = variants
+        changed = True
+        break
+    if changed:
+        _write_manifest_records(records)
+
+
 def _delete_record_by_id(rid: str, records: list[dict]) -> tuple[dict, int]:
     """Mutates `records` (drops the matching entry) and rmtree's the work_dir.
 
@@ -711,6 +783,8 @@ def _load_manifest_data() -> dict[str, Any]:
     records = sorted(records, key=lambda r: r.get("started_at") or "", reverse=True)
     summaries = _load_summaries(records)
     focused_results = _load_focused_results(records)
+    variant_summaries = _load_variant_summaries(records)
+    variant_focused_results = _load_variant_focused_results(records)
     previews = _load_previews(records)
     # Mirror dashboard.py's preview-path normalization
     previews = {
@@ -736,6 +810,8 @@ def _load_manifest_data() -> dict[str, Any]:
         "records": records,
         "summaries": summaries,
         "focused_results": focused_results,
+        "variant_summaries": variant_summaries,
+        "variant_focused_results": variant_focused_results,
         "previews": previews,
         "project_tags": PROJECT_TAGS,
     }
@@ -822,6 +898,12 @@ async def api_focused(req: Request):
     segments = body.get("segments") or []
     user_review = (body.get("user_review") or "").strip()
 
+    # Phase 11: variant slot routing (main / variant-a / variant-b).
+    raw_variant = (body.get("variant") or "main").strip()
+    if raw_variant not in VALID_VARIANTS:
+        raise HTTPException(400, f"variant must be one of {list(VALID_VARIANTS)}")
+    variant = raw_variant
+
     # Phase 6: auto_synthesize defaults to True iff claude is on PATH.
     raw_auto = body.get("auto_synthesize", None)
     if raw_auto is None:
@@ -850,6 +932,7 @@ async def api_focused(req: Request):
         "focused",
         auto_synthesize=auto_synthesize,
         work_dir=str(work_path),
+        variant=variant,
     )
 
     def _on_extract_done(full_lines: list[str]) -> None:
@@ -873,7 +956,7 @@ async def api_focused(req: Request):
             return
 
         # Chain synthesis
-        _spawn_synthesis(job_id, work_path, focused_report_path)
+        _spawn_synthesis(job_id, work_path, focused_report_path, variant)
 
     seg_json = json.dumps(segments, ensure_ascii=False)
     args = [
@@ -938,6 +1021,53 @@ def api_record_delete(rid: str):
         logger.exception("dashboard regen after delete failed (non-fatal)")
     logger.info("deleted record %s, freed %d bytes", rid, freed)
     return {"deleted": True, "id": rid, "freed_bytes": freed}
+
+
+@app.delete("/api/records/{rid}/variants/{slot}")
+def api_variant_delete(rid: str, slot: str):
+    """Delete one variant's output files + drop its manifest metadata.
+
+    Main slot can't be deleted via this endpoint — use DELETE /api/records/{rid}
+    to remove the whole record. Returning 400 (not silent no-op) so a typo
+    in the slot name surfaces.
+    """
+    if slot not in ("variant-a", "variant-b"):
+        raise HTTPException(400, "slot must be variant-a or variant-b")
+    records = _read_manifest_records()
+    idx = next((i for i, r in enumerate(records) if r.get("id") == rid), None)
+    if idx is None:
+        raise HTTPException(404, f"record not found: {rid}")
+    rec = records[idx]
+    work_dir = _rewrite_path(rec.get("work_dir") or "", PROJECT_DIR)
+    work_path = _validate_workdir_under_cache(work_dir)
+
+    result_name, summary_name = _variant_filenames(slot)
+    deleted_files: list[str] = []
+    for name in (result_name, summary_name):
+        f = work_path / name
+        if not f.exists():
+            continue
+        try:
+            f.unlink()
+            deleted_files.append(name)
+        except OSError as exc:
+            raise HTTPException(500, f"unlink {name} failed: {exc}")
+
+    variants = rec.get("variants") or {}
+    if slot in variants:
+        del variants[slot]
+        if variants:
+            rec["variants"] = variants
+        else:
+            rec.pop("variants", None)
+        _write_manifest_records(records)
+
+    try:
+        render_dashboard(MANIFEST_PATH, DASHBOARD_PATH)
+    except Exception:
+        logger.exception("dashboard regen after variant delete failed (non-fatal)")
+    logger.info("deleted variant %s on %s (%d files)", slot, rid, len(deleted_files))
+    return {"deleted": True, "id": rid, "slot": slot, "files": deleted_files}
 
 
 @app.post("/api/records/bulk-delete")
