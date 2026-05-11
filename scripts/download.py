@@ -104,6 +104,10 @@ def download_url(url: str, out_dir: Path) -> dict:
                 "uploader": raw.get("uploader") or raw.get("channel"),
                 "duration": raw.get("duration"),
                 "url": raw.get("webpage_url") or url,
+                "description": raw.get("description") or "",
+                "chapters": raw.get("chapters") or [],
+                "categories": raw.get("categories") or [],
+                "tags": raw.get("tags") or [],
             }
         except Exception as exc:
             print(f"[watch] info.json parse failed: {exc}", file=sys.stderr)
