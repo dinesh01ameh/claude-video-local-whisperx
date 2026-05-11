@@ -95,6 +95,15 @@ If the server isn't running, the dashboard falls back to clipboard mode automati
 
 The server runs on `127.0.0.1:4893` (override with `$env:WATCH_SERVER_PORT=4894`). Localhost-only by design — no auth, no external exposure. Logs rotate at 10 MB into `<project>/.watch-cache/server.log`.
 
+Synthesis defaults to Claude Sonnet at low effort — fast and cheap for the NLM template work. Override via env vars:
+
+```powershell
+$env:CLAUDE_SYNTHESIS_MODEL = "opus"      # default: sonnet
+$env:CLAUDE_SYNTHESIS_EFFORT = "medium"   # default: low
+$env:CLAUDE_SYNTHESIS_TIMEOUT_SEC = "1200"
+python scripts\dashboard_server.py
+```
+
 ## License
 
 MIT, same as upstream. Original work © Bradley Bonanno; modifications © Dinesh Raj.

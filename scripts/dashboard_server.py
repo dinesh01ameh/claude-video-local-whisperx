@@ -94,6 +94,11 @@ HOST = "127.0.0.1"
 # extraction-only and the dashboard hides the auto-synthesize toggle.
 CLAUDE_BIN = shutil.which("claude")
 SYNTHESIS_TIMEOUT_SEC = int(os.environ.get("CLAUDE_SYNTHESIS_TIMEOUT_SEC", "600"))
+# Synthesis defaults: sonnet @ effort=low is plenty for structured template
+# work (read frames, fill the NLM template, save two .md files). Override
+# via CLAUDE_SYNTHESIS_MODEL / CLAUDE_SYNTHESIS_EFFORT to push toward quality.
+SYNTHESIS_MODEL = os.environ.get("CLAUDE_SYNTHESIS_MODEL", "sonnet")
+SYNTHESIS_EFFORT = os.environ.get("CLAUDE_SYNTHESIS_EFFORT", "low")
 
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
@@ -269,8 +274,17 @@ def _spawn_synthesis(job_id: str, work_path: Path, focused_report_path: Path) ->
     # Write tool calls, with no TTY to respond. Verified empirically — without
     # the flag, synthesis stalls beyond our 600s timeout; with it, the same
     # workload finishes in 2-5 min.
-    args = [CLAUDE_BIN, "-p", "--dangerously-skip-permissions", prompt]
-    logger.info("job %s synthesizing via claude (timeout %ds)", job_id, SYNTHESIS_TIMEOUT_SEC)
+    args = [
+        CLAUDE_BIN, "-p",
+        "--dangerously-skip-permissions",
+        "--model", SYNTHESIS_MODEL,
+        "--effort", SYNTHESIS_EFFORT,
+        prompt,
+    ]
+    logger.info(
+        "job %s synthesizing via claude (model=%s, effort=%s, timeout=%ds)",
+        job_id, SYNTHESIS_MODEL, SYNTHESIS_EFFORT, SYNTHESIS_TIMEOUT_SEC,
+    )
     try:
         proc = subprocess.Popen(
             args,
@@ -1045,6 +1059,8 @@ def api_health():
         "watch_script": str(WATCH_SCRIPT),
         "project_dir": str(PROJECT_DIR),
         "synthesis_timeout_sec": SYNTHESIS_TIMEOUT_SEC,
+        "synthesis_model": SYNTHESIS_MODEL,
+        "synthesis_effort": SYNTHESIS_EFFORT,
     }
 
 
@@ -1076,6 +1092,7 @@ def main():
     logger.info("watch script: %s", WATCH_SCRIPT)
     if CLAUDE_BIN:
         logger.info("claude CLI: %s (auto-synthesis enabled)", CLAUDE_BIN)
+        logger.info("synthesis model: %s, effort: %s", SYNTHESIS_MODEL, SYNTHESIS_EFFORT)
     else:
         logger.warning("claude CLI not found on PATH — auto-synthesis disabled")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning", access_log=False)
