@@ -1782,9 +1782,16 @@ HTML_TEMPLATE = r"""<!doctype html>
           `<option value="${escapeHtml(t)}" ${t === a.project_tag ? "selected" : ""}>${t === "None" ? "(none)" : escapeHtml(t)}</option>`
         ).join("");
 
+        // Phase 12: legacy rows (created before --preview existed) have no
+        // preview.json, so the Mark button can't render. Surface a Refresh
+        // affordance — server re-runs watch.py --preview --out-dir on the
+        // existing work_dir without touching focused outputs.
+        const showRefreshPreview = !hasPreview && (status === "complete" || status === "focused-ready");
+
         // Action buttons: only render what's actionable. No more disabled "no NLM" / "no result" labels.
         const actionParts = [];
         if (workUri) actionParts.push(`<a href="${workUri}" title="Open work directory">work</a>`);
+        if (showRefreshPreview) actionParts.push(`<button data-action="refresh-preview" title="Re-extract sparse frames + transcript so you can use the marker UI on this row.">Refresh preview</button>`);
         if (isMarkable) {
           const markLabel = status === "focused-ready" ? "Re-mark" : "Mark";
           const markTitle = status === "focused-ready"
@@ -1866,6 +1873,27 @@ HTML_TEMPLATE = r"""<!doctype html>
       }
       if (action === "compare") {
         openCompareModal(id);
+        return;
+      }
+      if (action === "refresh-preview") {
+        if (!SERVER_MODE) {
+          showToast("Refresh requires the server (http://localhost:4893)");
+          return;
+        }
+        const rec = RECORDS.find(r => r.id === id);
+        fetch(`/api/records/${encodeURIComponent(id)}/refresh-preview`, { method: "POST" })
+          .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); }))
+          .then(data => {
+            openJobModal(
+              data.job_id,
+              "Refresh preview",
+              rec
+                ? `Re-extracting sparse frames + transcript for "${rec.title || rec.id}"…`
+                : "Re-extracting preview…",
+              { rec_id: id }
+            );
+          })
+          .catch(err => showToast("Refresh failed: " + err.message));
         return;
       }
       if (action === "preview-nlm") {
@@ -3192,6 +3220,22 @@ HTML_TEMPLATE = r"""<!doctype html>
       updateClaudeUI();
     }
 
+    // Phase 12: URL input placeholder text varies by mode. Static-mode users
+    // need to paste the generated command into their terminal; server-mode
+    // users have it submitted for them — same input box, opposite affordance.
+    const URL_PLACEHOLDER_SERVER = "Paste video URL to start preview…";
+    const URL_PLACEHOLDER_STATIC = "Paste video URL — generates the /watch --preview command for you to paste in your terminal";
+
+    function updateUrlPlaceholder(serverReachable) {
+      const input = document.getElementById("url-input");
+      if (!input) return;
+      // Treat undefined (initial state, before any /api/* response) as
+      // "reachable" so server-mode users see the server placeholder without
+      // a flicker between page load and first poll.
+      const useServer = SERVER_MODE && serverReachable !== false;
+      input.placeholder = useServer ? URL_PLACEHOLDER_SERVER : URL_PLACEHOLDER_STATIC;
+    }
+
     function setConnIndicator(ok) {
       const ind = document.getElementById("conn-indicator");
       if (!ind) return;
@@ -3199,7 +3243,13 @@ HTML_TEMPLATE = r"""<!doctype html>
       ind.classList.toggle("ok", !!ok);
       ind.classList.toggle("fail", !ok);
       ind.title = ok ? "Server connected" : "Server unreachable — falling back to embedded data";
+      updateUrlPlaceholder(!!ok);
     }
+
+    // Initial pass — sets the server-mode placeholder right after page load so
+    // server-mode users don't see the static command-paste hint before the
+    // first /api/* response.
+    updateUrlPlaceholder(undefined);
 
     /** Pull the live manifest in server mode. Replaces RECORDS/SUMMARIES/etc.
      *  and re-renders. No-op in static mode. */

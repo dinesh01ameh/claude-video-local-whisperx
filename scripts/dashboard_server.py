@@ -605,6 +605,27 @@ PROTECTED_CACHE_NAMES = {
 ORPHAN_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
+def _clean_dir(path: Path, *, exclude: tuple[str, ...] = ()) -> None:
+    """Remove every entry under `path` whose name isn't in `exclude`.
+
+    No-op if `path` doesn't exist. Used by refresh-preview to wipe stale
+    frames before re-extraction, while preserving sibling subdirs that
+    belong to other pipeline stages (e.g. focused-frames/).
+    """
+    if not path.exists() or not path.is_dir():
+        return
+    for entry in path.iterdir():
+        if entry.name in exclude:
+            continue
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=False)
+            else:
+                entry.unlink()
+        except OSError as exc:
+            logger.warning("clean_dir: couldn't remove %s: %s", entry, exc)
+
+
 def _dir_size(path: Path) -> int:
     """Recursive sum of file sizes under `path`. Missing/locked files counted as 0."""
     total = 0
@@ -886,6 +907,64 @@ async def api_preview(req: Request):
     _update_job(job_id, status="extracting", phase="extract")
     _spawn(job_id, args, on_done=_on_extract_done, channel="extract")
     return {"job_id": job_id}
+
+
+@app.post("/api/records/{record_id}/refresh-preview")
+def api_refresh_preview(record_id: str):
+    """Re-extract preview frames + transcript for an existing record.
+
+    Targets rows created before --preview existed (full-pipeline runs that
+    never wrote preview.json), which are otherwise unmarkable. Touches
+    frames/ + preview.json only — focused outputs, variants, and
+    focused.json stay put.
+    """
+    records = _read_manifest_records()
+    rec = next((r for r in records if r.get("id") == record_id), None)
+    if rec is None:
+        raise HTTPException(404, f"record not found: {record_id}")
+
+    source = (rec.get("source") or "").strip()
+    if not source:
+        raise HTTPException(400, "record has no source — cannot refresh")
+    # watch.py handles URLs (http/https) and local files. Reject obvious
+    # garbage early; let watch.py do the deep validation.
+    is_url = source.startswith("http://") or source.startswith("https://")
+    if not is_url and not Path(source).exists():
+        raise HTTPException(
+            400, f"source isn't a URL or existing local path: {source}"
+        )
+
+    work_dir = _rewrite_path(rec.get("work_dir") or "", PROJECT_DIR)
+    if not work_dir:
+        raise HTTPException(400, "record has no work_dir")
+    work_path = _validate_workdir_under_cache(work_dir)
+    if not work_path.exists():
+        raise HTTPException(404, f"work_dir does not exist: {work_dir}")
+
+    if _is_active_workdir(work_dir):
+        raise HTTPException(409, f"active job in progress on {record_id}")
+
+    # Wipe stale frames before re-extraction. Preserve focused-frames/ — that
+    # belongs to focused-mode extraction and isn't touched by --preview.
+    _clean_dir(work_path / "frames", exclude=("focused-frames",))
+
+    job_id = _new_job("preview", work_dir=str(work_path))
+
+    def _on_extract_done(_lines: list[str]) -> None:
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["extract_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _update_job(job_id, status="done", phase=None)
+
+    args = [
+        sys.executable, str(WATCH_SCRIPT),
+        "--preview", source,
+        "--out-dir", str(work_path),
+    ]
+    _update_job(job_id, status="extracting", phase="extract")
+    _spawn(job_id, args, on_done=_on_extract_done, channel="extract")
+    logger.info("refresh-preview %s → job %s (work=%s)", record_id, job_id, work_path)
+    return {"job_id": job_id, "record_id": record_id, "work_dir": str(work_path)}
 
 
 @app.post("/api/focused")
