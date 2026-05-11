@@ -1604,7 +1604,13 @@ HTML_TEMPLATE = r"""<!doctype html>
         // Action buttons: only render what's actionable. No more disabled "no NLM" / "no result" labels.
         const actionParts = [];
         if (workUri) actionParts.push(`<a href="${workUri}" title="Open work directory">work</a>`);
-        if (isMarkable) actionParts.push(`<button data-action="mark" class="mark-cta" title="Mark must/skip segments and generate the focused command">Mark</button>`);
+        if (isMarkable) {
+          const markLabel = status === "focused-ready" ? "Re-mark" : "Mark";
+          const markTitle = status === "focused-ready"
+            ? "Re-open the marker editor to change segments, switch model, or re-run synthesis"
+            : "Mark must/skip segments and generate the focused command";
+          actionParts.push(`<button data-action="mark" class="mark-cta" title="${markTitle}">${markLabel}</button>`);
+        }
         if (hasResult) actionParts.push(`<button data-action="preview-result" title="Read the long-form focused result">Result</button>`);
         if (hasNlm) actionParts.push(`<button data-action="preview-nlm" title="Preview the NLM-ready summary">NLM</button>`);
         actionParts.push(`<button data-action="copy-rerun" title="Copy re-run command to clipboard">re-run</button>`);
