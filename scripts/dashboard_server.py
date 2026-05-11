@@ -26,10 +26,11 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from fastapi import FastAPI, HTTPException, Request
@@ -102,6 +103,13 @@ SYNTHESIS_TIMEOUT_SEC = int(os.environ.get("CLAUDE_SYNTHESIS_TIMEOUT_SEC", "600"
 SYNTHESIS_MODEL = os.environ.get("CLAUDE_SYNTHESIS_MODEL", "sonnet")
 SYNTHESIS_EFFORT = os.environ.get("CLAUDE_SYNTHESIS_EFFORT", "low")
 
+# Phase 15: per-phase concurrency limits. Preview defaults to 2 because
+# yt-dlp + ffmpeg are I/O-bound and parallelism helps. Synthesis defaults
+# to 1 because each `claude -p` consumes Max plan tokens — parallel runs
+# rarely beat sequential and risk rate-limit collisions.
+PREVIEW_CONCURRENCY = max(1, int(os.environ.get("WATCH_PREVIEW_CONCURRENCY", "2")))
+SYNTHESIS_CONCURRENCY = max(1, int(os.environ.get("WATCH_SYNTHESIS_CONCURRENCY", "1")))
+
 # Phase 11: variant slots — up to 3 saved focused-output sets per record
 # (main + variant-a + variant-b) for side-by-side A/B comparison.
 VALID_VARIANTS = ("main", "variant-a", "variant-b")
@@ -173,6 +181,75 @@ logger.addHandler(_stream_handler)
 JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
 LOG_TAIL_CAP = 500
+
+
+# ─── Phase 15: per-phase queue (preview / synthesis) ────────────────────────
+
+# Active = currently running subprocess for that phase. Waiting = closures
+# pending admission, in submission order. Lock guards both; release-then-admit
+# happens atomically so a draining slot can never be claimed twice.
+QUEUE_LOCK = threading.Lock()
+ACTIVE_PREVIEW: set[str] = set()
+ACTIVE_SYNTHESIS: set[str] = set()
+WAITING_PREVIEW: "deque[dict[str, Any]]" = deque()
+WAITING_SYNTHESIS: "deque[dict[str, Any]]" = deque()
+
+
+def _queue_state(phase: str) -> tuple[set[str], "deque[dict[str, Any]]", int]:
+    if phase == "preview":
+        return ACTIVE_PREVIEW, WAITING_PREVIEW, PREVIEW_CONCURRENCY
+    if phase == "synthesis":
+        return ACTIVE_SYNTHESIS, WAITING_SYNTHESIS, SYNTHESIS_CONCURRENCY
+    raise ValueError(f"unknown phase: {phase}")
+
+
+def _admit_or_queue(phase: str, job_id: str, spawn_fn: Callable[[], None]) -> None:
+    """Admit immediately if the phase has spare capacity; otherwise enqueue.
+
+    `spawn_fn()` is a zero-arg closure that performs the actual subprocess
+    spawn + status update. Queueing it lets us defer Popen until a slot is
+    free without blocking the request thread.
+    """
+    admit_now = False
+    with QUEUE_LOCK:
+        active, waiting, limit = _queue_state(phase)
+        if len(active) < limit:
+            active.add(job_id)
+            admit_now = True
+        else:
+            waiting.append({"job_id": job_id, "spawn_fn": spawn_fn})
+    if admit_now:
+        try:
+            spawn_fn()
+        except Exception:
+            logger.exception("spawn for job %s (%s) crashed during admit", job_id, phase)
+            _drain_release(phase, job_id)
+    else:
+        _update_job(job_id, status="waiting", phase=phase)
+        logger.info("job %s queued (%s) — %d waiting", job_id, phase, len(WAITING_PREVIEW if phase == "preview" else WAITING_SYNTHESIS))
+
+
+def _drain_release(phase: str, job_id: str) -> None:
+    """Free the slot held by `job_id` and admit the next waiting job, if any.
+
+    Called from each subprocess's terminal handler (`_stream_subprocess` and
+    `_run_synthesis_with_timeout`) via try/finally so the slot is always
+    released — success, failure, timeout, or crash.
+    """
+    next_entry: dict[str, Any] | None = None
+    with QUEUE_LOCK:
+        active, waiting, _limit = _queue_state(phase)
+        active.discard(job_id)
+        if waiting:
+            next_entry = waiting.popleft()
+            active.add(next_entry["job_id"])
+    if next_entry is not None:
+        logger.info("job %s admitted from %s queue", next_entry["job_id"], phase)
+        try:
+            next_entry["spawn_fn"]()
+        except Exception:
+            logger.exception("queued spawn for job %s (%s) crashed", next_entry["job_id"], phase)
+            _drain_release(phase, next_entry["job_id"])
 
 
 def _new_job(kind: str, **extra) -> str:
@@ -264,19 +341,26 @@ def _stream_subprocess(
     except Exception as exc:
         _update_job(job_id, status="failed", error=str(exc))
         logger.exception("job %s crashed", job_id)
+    finally:
+        # Phase 15: free the preview-pool slot regardless of how we exited
+        # so the next queued job can be admitted. Synthesis (if chained) is
+        # gated by its own pool inside _spawn_synthesis.
+        _drain_release("preview", job_id)
 
 
-def _spawn(
+def _spawn_now(
     job_id: str,
     args: list[str],
     on_done=None,
     channel: str = "extract",
     cwd: str | None = None,
 ) -> None:
+    """Actually launch the subprocess. Always reached via _admit_or_queue."""
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["WATCH_PROJECT_DIR"] = str(PROJECT_DIR)
     logger.info("job %s starting (%s): %s", job_id, channel, " ".join(args))
+    _update_job(job_id, status="extracting", phase="extract")
     try:
         proc = subprocess.Popen(
             args,
@@ -292,6 +376,7 @@ def _spawn(
     except OSError as exc:
         _update_job(job_id, status="failed", error=str(exc))
         logger.exception("failed to spawn job %s", job_id)
+        _drain_release("preview", job_id)
         return
     _update_job(job_id, process=proc, pid=proc.pid)
     threading.Thread(
@@ -299,6 +384,23 @@ def _spawn(
         args=(job_id, proc, channel, on_done),
         daemon=True,
     ).start()
+
+
+def _spawn(
+    job_id: str,
+    args: list[str],
+    on_done=None,
+    channel: str = "extract",
+    cwd: str | None = None,
+) -> None:
+    """Queue-aware spawn for the preview/extract phase.
+
+    All extraction subprocesses (preview, focused-extract, refresh-preview)
+    share a single concurrency pool — they're all yt-dlp + ffmpeg workloads.
+    """
+    def go() -> None:
+        _spawn_now(job_id, args, on_done=on_done, channel=channel, cwd=cwd)
+    _admit_or_queue("preview", job_id, go)
 
 
 # ─── Synthesis (Phase 6: chain `claude -p` after focused extraction) ─────────
@@ -331,112 +433,120 @@ def _spawn_synthesis(
         f"(NLM-paste version) to {work_path}. Confirm in one line when done."
     )
 
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["WATCH_PROJECT_DIR"] = str(PROJECT_DIR)
+    # Phase 15: route synthesis through the synthesis-concurrency pool. The
+    # closure captures the prompt + filenames built above; _admit_or_queue
+    # runs it now if a slot's free, otherwise defers it (job status flips
+    # to "waiting") until one frees up.
+    def go() -> None:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["WATCH_PROJECT_DIR"] = str(PROJECT_DIR)
 
-    # --dangerously-skip-permissions is required for headless invocation:
-    # without it `claude -p` blocks waiting for a permission prompt on Read /
-    # Write tool calls, with no TTY to respond. Verified empirically — without
-    # the flag, synthesis stalls beyond our 600s timeout; with it, the same
-    # workload finishes in 2-5 min.
-    args = [
-        CLAUDE_BIN, "-p",
-        "--dangerously-skip-permissions",
-        "--model", SYNTHESIS_MODEL,
-        "--effort", SYNTHESIS_EFFORT,
-        prompt,
-    ]
-    logger.info(
-        "job %s synthesizing via claude (model=%s, effort=%s, timeout=%ds, base=%ds)",
-        job_id, SYNTHESIS_MODEL, SYNTHESIS_EFFORT, effective_timeout, SYNTHESIS_TIMEOUT_SEC,
-    )
-    try:
-        proc = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            bufsize=1,
-            cwd=str(PROJECT_DIR),
+        # --dangerously-skip-permissions is required for headless invocation:
+        # without it `claude -p` blocks waiting for a permission prompt on
+        # Read / Write tool calls, with no TTY to respond. Without the flag
+        # synthesis stalls past our 600s timeout; with it, the same workload
+        # finishes in 2-5 min.
+        args = [
+            CLAUDE_BIN, "-p",
+            "--dangerously-skip-permissions",
+            "--model", SYNTHESIS_MODEL,
+            "--effort", SYNTHESIS_EFFORT,
+            prompt,
+        ]
+        logger.info(
+            "job %s synthesizing via claude (model=%s, effort=%s, timeout=%ds, base=%ds)",
+            job_id, SYNTHESIS_MODEL, SYNTHESIS_EFFORT, effective_timeout, SYNTHESIS_TIMEOUT_SEC,
         )
-    except OSError as exc:
-        _update_job(job_id, status="failed", error=f"failed to spawn claude: {exc}")
-        return
-
-    synthesis_started_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    _update_job(
-        job_id,
-        status="synthesizing", phase="synthesize",
-        process=proc, pid=proc.pid,
-        synthesis_started_at=synthesis_started_iso,
-    )
-    # Surface a hint immediately — claude -p is silent during tool use, so
-    # without this the user sees an empty Synthesis tab and assumes hang.
-    _append_log(
-        job_id,
-        "[INFO] claude -p running silently during tool use; logs appear when it writes files or finishes (~30-90s expected)",
-        channel="synthesis",
-    )
-    # Background file-watcher: complements the subprocess streamer by surfacing
-    # [WROTE] events as soon as Claude saves each .md file via the Write tool.
-    threading.Thread(
-        target=_watch_synthesis_files,
-        args=(job_id, work_path, variant),
-        daemon=True,
-    ).start()
-
-    def _verify_outputs(_lines: list[str]) -> None:
-        focused_result = work_path / result_name
-        nlm_summary = work_path / summary_name
-        missing = []
-        if not focused_result.exists():
-            missing.append(result_name)
-        if not nlm_summary.exists():
-            missing.append(summary_name)
-        if missing:
-            _update_job(
-                job_id,
-                status="failed",
-                error=(
-                    f"Claude exited cleanly but {' / '.join(missing)} is missing — "
-                    "skill may have misfired. Run the prompt manually to debug, "
-                    "or ensure the watch plugin is installed at user scope: "
-                    "/plugin install watch@claude-video-local-whisperx"
-                ),
-            )
-            return
-        # Stamp the manifest record with this slot's model/effort/timestamp so
-        # the Compare modal can label each column with what produced it.
         try:
-            _update_variant_metadata(
-                str(work_path), variant, SYNTHESIS_MODEL, SYNTHESIS_EFFORT
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                bufsize=1,
+                cwd=str(PROJECT_DIR),
             )
-        except Exception:
-            logger.exception("variant metadata update failed (non-fatal)")
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is None:
-                return
-            job["synthesis_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            existing_result = job.get("result") or {}
-            existing_result.update({
-                "focused_result_path": str(focused_result),
-                "nlm_summary_path": str(nlm_summary),
-                "variant": variant,
-            })
-            job["result"] = existing_result
-        _update_job(job_id, status="done", phase=None)
-        logger.info("job %s synthesis verified (variant=%s)", job_id, variant)
+        except OSError as exc:
+            _update_job(job_id, status="failed", error=f"failed to spawn claude: {exc}")
+            _drain_release("synthesis", job_id)
+            return
 
-    threading.Thread(
-        target=_run_synthesis_with_timeout,
-        args=(job_id, proc, _verify_outputs, effective_timeout),
-        daemon=True,
-    ).start()
+        synthesis_started_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _update_job(
+            job_id,
+            status="synthesizing", phase="synthesize",
+            process=proc, pid=proc.pid,
+            synthesis_started_at=synthesis_started_iso,
+        )
+        # Surface a hint immediately — claude -p is silent during tool use,
+        # so without this the user sees an empty Synthesis tab and assumes hang.
+        _append_log(
+            job_id,
+            "[INFO] claude -p running silently during tool use; logs appear when it writes files or finishes (~30-90s expected)",
+            channel="synthesis",
+        )
+        # Background file-watcher: complements the subprocess streamer by surfacing
+        # [WROTE] events as soon as Claude saves each .md file via the Write tool.
+        threading.Thread(
+            target=_watch_synthesis_files,
+            args=(job_id, work_path, variant),
+            daemon=True,
+        ).start()
+
+        def _verify_outputs(_lines: list[str]) -> None:
+            focused_result = work_path / result_name
+            nlm_summary = work_path / summary_name
+            missing = []
+            if not focused_result.exists():
+                missing.append(result_name)
+            if not nlm_summary.exists():
+                missing.append(summary_name)
+            if missing:
+                _update_job(
+                    job_id,
+                    status="failed",
+                    error=(
+                        f"Claude exited cleanly but {' / '.join(missing)} is missing — "
+                        "skill may have misfired. Run the prompt manually to debug, "
+                        "or ensure the watch plugin is installed at user scope: "
+                        "/plugin install watch@claude-video-local-whisperx"
+                    ),
+                )
+                return
+            # Stamp the manifest record with this slot's model/effort/timestamp
+            # so the Compare modal can label each column with what produced it.
+            try:
+                _update_variant_metadata(
+                    str(work_path), variant, SYNTHESIS_MODEL, SYNTHESIS_EFFORT
+                )
+            except Exception:
+                logger.exception("variant metadata update failed (non-fatal)")
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                if job is None:
+                    return
+                job["synthesis_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                existing_result = job.get("result") or {}
+                existing_result.update({
+                    "focused_result_path": str(focused_result),
+                    "nlm_summary_path": str(nlm_summary),
+                    "variant": variant,
+                })
+                job["result"] = existing_result
+            _update_job(job_id, status="done", phase=None)
+            logger.info("job %s synthesis verified (variant=%s)", job_id, variant)
+
+        threading.Thread(
+            target=_run_synthesis_with_timeout,
+            args=(job_id, proc, _verify_outputs, effective_timeout),
+            daemon=True,
+        ).start()
+
+    _admit_or_queue("synthesis", job_id, go)
 
 
 def _watch_synthesis_files(job_id: str, work_path: Path, variant: str = "main") -> None:
@@ -490,7 +600,11 @@ def _run_synthesis_with_timeout(
     on_done,
     timeout_sec: int,
 ) -> None:
-    """Stream the synthesis subprocess output, enforcing a wall-clock timeout."""
+    """Stream the synthesis subprocess output, enforcing a wall-clock timeout.
+
+    Releases the synthesis-pool slot in `finally` so the next queued
+    synthesis job is admitted regardless of how this one exits.
+    """
     full_lines: list[str] = []
 
     def reader():
@@ -506,41 +620,44 @@ def _run_synthesis_with_timeout(
     reader_thread = threading.Thread(target=reader, daemon=True)
     reader_thread.start()
     try:
-        rc = proc.wait(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
         try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
+            rc = proc.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
             try:
-                proc.kill()
+                proc.terminate()
+                proc.wait(timeout=5)
             except Exception:
-                pass
-        _update_job(
-            job_id,
-            status="failed",
-            error=(
-                f"synthesis timed out after {timeout_sec}s "
-                "— set CLAUDE_SYNTHESIS_TIMEOUT_SEC to extend, or run the prompt manually"
-            ),
-        )
-        logger.warning("job %s synthesis timed out", job_id)
-        return
-    reader_thread.join(timeout=2)
-    if rc == 0 and on_done:
-        try:
-            on_done(full_lines)
-        except Exception as exc:
-            _update_job(job_id, status="failed", error=str(exc))
-            logger.exception("synthesis on_done for job %s failed", job_id)
-    elif rc != 0:
-        tail_text = "\n".join(full_lines[-10:]) if full_lines else "(no output)"
-        _update_job(
-            job_id,
-            status="failed",
-            error=f"claude exited with code {rc}\n{tail_text}",
-        )
-        logger.warning("job %s synthesis failed (rc=%d)", job_id, rc)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            _update_job(
+                job_id,
+                status="failed",
+                error=(
+                    f"synthesis timed out after {timeout_sec}s "
+                    "— set CLAUDE_SYNTHESIS_TIMEOUT_SEC to extend, or run the prompt manually"
+                ),
+            )
+            logger.warning("job %s synthesis timed out", job_id)
+            return
+        reader_thread.join(timeout=2)
+        if rc == 0 and on_done:
+            try:
+                on_done(full_lines)
+            except Exception as exc:
+                _update_job(job_id, status="failed", error=str(exc))
+                logger.exception("synthesis on_done for job %s failed", job_id)
+        elif rc != 0:
+            tail_text = "\n".join(full_lines[-10:]) if full_lines else "(no output)"
+            _update_job(
+                job_id,
+                status="failed",
+                error=f"claude exited with code {rc}\n{tail_text}",
+            )
+            logger.warning("job %s synthesis failed (rc=%d)", job_id, rc)
+    finally:
+        _drain_release("synthesis", job_id)
 
 
 # ─── Path safety ─────────────────────────────────────────────────────────────
@@ -921,28 +1038,47 @@ def api_manifest():
 
 @app.post("/api/preview")
 async def api_preview(req: Request):
+    """Phase 15: accepts either {"url": "..."} (legacy single) or
+    {"urls": [...]} (bulk). Always returns {"job_id": <first>, "job_ids": [...]}
+    so legacy clients keep working while bulk callers see every id.
+    """
     try:
         body = await req.json()
     except Exception:
         raise HTTPException(400, "invalid JSON body")
-    url = (body.get("url") or "").strip()
-    if not url:
-        raise HTTPException(400, "url required")
-    if not (url.startswith("http://") or url.startswith("https://")):
-        raise HTTPException(400, "url must start with http(s)://")
 
-    job_id = _new_job("preview")
+    urls_raw = body.get("urls")
+    if urls_raw is None:
+        single = (body.get("url") or "").strip()
+        if not single:
+            raise HTTPException(400, "url or urls required")
+        urls = [single]
+    elif isinstance(urls_raw, list):
+        urls = [str(u).strip() for u in urls_raw if str(u).strip()]
+        if not urls:
+            raise HTTPException(400, "urls list contained no non-empty entries")
+    else:
+        raise HTTPException(400, "urls must be a list of strings")
 
-    def _on_extract_done(_lines: list[str]) -> None:
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["extract_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        _update_job(job_id, status="done", phase=None)
+    # Fail fast on bad batches — reject the whole call rather than queue some.
+    for u in urls:
+        if not (u.startswith("http://") or u.startswith("https://")):
+            raise HTTPException(400, f"each URL must start with http(s)://: {u!r}")
 
-    args = [sys.executable, str(WATCH_SCRIPT), "--preview", url]
-    _update_job(job_id, status="extracting", phase="extract")
-    _spawn(job_id, args, on_done=_on_extract_done, channel="extract")
-    return {"job_id": job_id}
+    job_ids: list[str] = []
+    for url in urls:
+        job_id = _new_job("preview")
+
+        def _on_extract_done(_lines: list[str], _jid: str = job_id) -> None:
+            with JOBS_LOCK:
+                if _jid in JOBS:
+                    JOBS[_jid]["extract_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            _update_job(_jid, status="done", phase=None)
+
+        args = [sys.executable, str(WATCH_SCRIPT), "--preview", url]
+        _spawn(job_id, args, on_done=_on_extract_done, channel="extract")
+        job_ids.append(job_id)
+    return {"job_id": job_ids[0], "job_ids": job_ids}
 
 
 @app.post("/api/records/{record_id}/refresh-preview")
@@ -997,7 +1133,6 @@ def api_refresh_preview(record_id: str):
         "--preview", source,
         "--out-dir", str(work_path),
     ]
-    _update_job(job_id, status="extracting", phase="extract")
     _spawn(job_id, args, on_done=_on_extract_done, channel="extract")
     logger.info("refresh-preview %s → job %s (work=%s)", record_id, job_id, work_path)
     return {"job_id": job_id, "record_id": record_id, "work_dir": str(work_path)}
@@ -1094,7 +1229,6 @@ async def api_focused(req: Request):
         "--segments-json", seg_json,
         "--user-review", user_review,
     ]
-    _update_job(job_id, status="extracting", phase="extract")
     _spawn(job_id, args, on_done=_on_extract_done, channel="extract")
     return {
         "job_id": job_id,
@@ -1319,7 +1453,46 @@ def api_health():
         "synthesis_timeout_sec": SYNTHESIS_TIMEOUT_SEC,
         "synthesis_model": SYNTHESIS_MODEL,
         "synthesis_effort": SYNTHESIS_EFFORT,
+        "preview_concurrency": PREVIEW_CONCURRENCY,
+        "synthesis_concurrency": SYNTHESIS_CONCURRENCY,
     }
+
+
+@app.get("/api/queue")
+def api_queue():
+    """Snapshot the per-phase queue state. Dashboard polls this on a 3s tick."""
+    with QUEUE_LOCK:
+        return {
+            "preview": {
+                "limit": PREVIEW_CONCURRENCY,
+                "active": sorted(ACTIVE_PREVIEW),
+                "waiting": [e["job_id"] for e in WAITING_PREVIEW],
+            },
+            "synthesis": {
+                "limit": SYNTHESIS_CONCURRENCY,
+                "active": sorted(ACTIVE_SYNTHESIS),
+                "waiting": [e["job_id"] for e in WAITING_SYNTHESIS],
+            },
+        }
+
+
+@app.post("/api/queue/clear-waiting")
+def api_queue_clear_waiting(phase: str = ""):
+    """Drop every waiting job in a phase. Already-running jobs aren't affected.
+
+    Use POST /api/jobs/{id}/cancel to terminate a running subprocess.
+    """
+    if phase not in ("preview", "synthesis"):
+        raise HTTPException(400, "phase must be 'preview' or 'synthesis'")
+    cleared: list[str] = []
+    with QUEUE_LOCK:
+        _active, waiting, _limit = _queue_state(phase)
+        while waiting:
+            cleared.append(waiting.popleft()["job_id"])
+    for jid in cleared:
+        _update_job(jid, status="failed", error="cancelled before starting (queue cleared)")
+    logger.info("cleared %d waiting %s jobs", len(cleared), phase)
+    return {"phase": phase, "cleared": cleared, "count": len(cleared)}
 
 
 @app.post("/api/jobs/{job_id}/cancel")

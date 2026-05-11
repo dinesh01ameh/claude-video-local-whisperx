@@ -327,12 +327,17 @@ HTML_TEMPLATE = r"""<!doctype html>
       display: flex; gap: 8px; align-items: center;
       padding: 10px 20px; border-bottom: 0.5px solid var(--border); background: var(--panel);
     }
-    .urlbar input[type=url] {
-      flex: 1; min-width: 280px;
+    .urlbar textarea {
+      flex: 1; min-width: 280px; min-height: 38px; max-height: 180px;
       background: var(--bg); color: var(--text); border: 1px solid var(--border);
       padding: 8px 12px; border-radius: 5px; font: 13px inherit;
+      resize: none; line-height: 1.5; overflow-y: auto;
     }
-    .urlbar input[type=url]:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+    .urlbar textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+    .urlbar .urlbar-hint {
+      font-size: 10px; color: var(--muted);
+      align-self: flex-end; padding-bottom: 6px;
+    }
     .urlbar button {
       background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
       padding: 8px 16px; border-radius: 5px; font: 13px inherit; cursor: pointer; font-weight: 500;
@@ -1118,6 +1123,36 @@ HTML_TEMPLATE = r"""<!doctype html>
     .marker-chapter-count {
       font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
     }
+
+    /* Phase 15: queue panel (per-phase active + waiting counts) + waiting badge */
+    .job-status.waiting { color: var(--muted); border-color: var(--border); }
+    .queue-panel {
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 8px 20px; background: rgba(122, 166, 255, 0.04);
+      border-bottom: 1px solid var(--border);
+    }
+    .queue-panel[hidden] { display: none; }
+    .queue-row {
+      display: flex; align-items: center; gap: 10px; font-size: 12px;
+    }
+    .queue-label {
+      color: var(--muted); font-weight: 500; min-width: 88px;
+      text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;
+    }
+    .queue-stat {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 3px 10px; border-radius: 3px; font: 11px inherit;
+      cursor: pointer; font-variant-numeric: tabular-nums;
+    }
+    .queue-stat:hover { border-color: var(--accent); color: var(--accent); }
+    .queue-stat-waiting { color: var(--muted); }
+    .queue-clear {
+      background: var(--bg); color: var(--muted); border: 1px dashed var(--border);
+      padding: 3px 10px; border-radius: 3px; font: 11px inherit;
+      cursor: pointer; margin-left: auto;
+    }
+    .queue-clear:hover { color: var(--red); border-color: var(--red); border-style: solid; }
+    .queue-clear[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -1129,11 +1164,29 @@ HTML_TEMPLATE = r"""<!doctype html>
   </div>
 
   <div class="urlbar">
-    <input id="url-input" type="url" placeholder="Paste video URL — generates the /watch --preview command for you to paste in your terminal" autocomplete="off">
-    <button id="url-add-btn">+ Add video</button>
+    <textarea id="url-input" rows="1" autocomplete="off"
+      placeholder="Paste video URL — generates the /watch --preview command for you to paste in your terminal"></textarea>
+    <span class="urlbar-hint">Enter to submit · Shift+Enter for newline</span>
+    <button id="url-add-btn">+ Add</button>
   </div>
 
   <div class="stats" id="stats"></div>
+
+  <!-- Phase 15: queue panel — per-phase active + waiting counts -->
+  <div class="queue-panel" id="queue-panel" hidden>
+    <div class="queue-row">
+      <span class="queue-label">Preview</span>
+      <button class="queue-stat" id="queue-preview-active" data-phase="preview" data-bucket="active" title="Click to inspect">0 active</button>
+      <button class="queue-stat queue-stat-waiting" id="queue-preview-waiting" data-phase="preview" data-bucket="waiting" title="Click to inspect">0 waiting</button>
+      <button class="queue-clear" data-phase="preview" hidden>Clear waiting</button>
+    </div>
+    <div class="queue-row">
+      <span class="queue-label">Synthesis</span>
+      <button class="queue-stat" id="queue-synthesis-active" data-phase="synthesis" data-bucket="active" title="Click to inspect">0 active</button>
+      <button class="queue-stat queue-stat-waiting" id="queue-synthesis-waiting" data-phase="synthesis" data-bucket="waiting" title="Click to inspect">0 waiting</button>
+      <button class="queue-clear" data-phase="synthesis" hidden>Clear waiting</button>
+    </div>
+  </div>
 
   <div class="controls">
     <input id="q" type="search" placeholder="Filter by title, uploader, source, transcript, notes…  ( / to focus )" autofocus>
@@ -2938,33 +2991,72 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     document.getElementById("url-add-btn").addEventListener("click", submitUrl);
     document.getElementById("url-input").addEventListener("keydown", e => {
-      if (e.key === "Enter") { e.preventDefault(); submitUrl(); }
+      // Enter submits; Shift+Enter inserts a newline so users can paste
+      // multi-URL lists without accidental submits mid-typing.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        submitUrl();
+      }
     });
+    document.getElementById("url-input").addEventListener("input", e => autoGrowTextarea(e.target));
+
+    /** Phase 15: keep textarea height proportional to content, capped at ~6 rows. */
+    function autoGrowTextarea(el) {
+      if (!el) return;
+      el.style.height = "auto";
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || 20;
+      const maxHeight = lh * 6 + 20;  // 6 lines + padding
+      el.style.height = Math.min(el.scrollHeight, maxHeight) + "px";
+    }
+
     function submitUrl() {
       const input = document.getElementById("url-input");
-      const url = input.value.trim();
-      if (!isPlausibleUrl(url)) {
-        showToast("That doesn't look like a video URL — paste a full http(s) URL");
+      const raw = input.value;
+      const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      if (lines.length === 0) {
+        showToast("Paste at least one URL");
         return;
+      }
+      const valid = lines.filter(isPlausibleUrl);
+      const skipped = lines.length - valid.length;
+      if (valid.length === 0) {
+        showToast("No valid http(s) URLs found");
+        return;
+      }
+      if (skipped > 0) {
+        showToast(`${skipped} line${skipped === 1 ? "" : "s"} skipped (not URLs)`);
       }
       if (SERVER_MODE) {
         fetch("/api/preview", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ urls: valid }),
         }).then(r => {
           if (!r.ok) return r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); });
           return r.json();
         }).then(data => {
           input.value = "";
-          openJobModal(data.job_id, "Preview", "Downloading and extracting sparse frames…", null);
+          autoGrowTextarea(input);
+          const ids = data.job_ids || (data.job_id ? [data.job_id] : []);
+          if (ids.length === 0) return;
+          const title = ids.length === 1 ? "Preview" : `Preview (1 of ${ids.length})`;
+          const detail = ids.length === 1
+            ? "Downloading and extracting sparse frames…"
+            : `${ids.length} previews queued. Showing the first; the rest run in the background.`;
+          openJobModal(ids[0], title, detail, null);
+          refreshQueue();
         }).catch(err => {
           showToast("Server rejected the preview request: " + err.message);
         });
       } else {
-        const cmd = `python "${SCRIPT_PATH}" --preview "${url}"`;
-        navigator.clipboard.writeText(cmd).then(
-          () => { showToast("Command copied — paste in your terminal to start the preview"); input.value = ""; },
+        // Static mode: copy one shell command per URL on its own line.
+        const cmds = valid.map(u => `python "${SCRIPT_PATH}" --preview "${u}"`);
+        navigator.clipboard.writeText(cmds.join("\n")).then(
+          () => {
+            showToast(`${cmds.length} command${cmds.length === 1 ? "" : "s"} copied — paste in terminal`);
+            input.value = "";
+            autoGrowTextarea(input);
+          },
           () => showToast("Couldn't copy — check clipboard permissions")
         );
       }
@@ -3114,6 +3206,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     let autoSwitchedToSynthesis = false;     // one-shot per-job flag
     let jobAutoCloseHandle = null;
     const claudeState = { available: false, path: null };
+    // Phase 15: capability flags from /api/health. Defaults match the
+    // server-side defaults so the UI looks right even before the first
+    // health response.
+    const serverHealth = { preview_concurrency: 2, synthesis_concurrency: 1 };
 
     function openJobModal(jobId, title, detail, meta) {
       currentJobId = jobId;
@@ -3163,6 +3259,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function jobModalTitle(job) {
+      if (job.status === "waiting") return "Waiting for slot…";
       if (job.kind === "preview") {
         if (job.status === "extracting" || job.status === "queued") return "Preview: extracting frames";
         if (job.status === "done") return "Preview ready";
@@ -3373,8 +3470,11 @@ HTML_TEMPLATE = r"""<!doctype html>
           if (data) {
             claudeState.available = !!data.claude_available;
             claudeState.path = data.claude_path;
+            if (data.preview_concurrency) serverHealth.preview_concurrency = data.preview_concurrency;
+            if (data.synthesis_concurrency) serverHealth.synthesis_concurrency = data.synthesis_concurrency;
           }
           updateClaudeUI();
+          updateUrlPlaceholder(true);
         })
         .catch(() => updateClaudeUI());
     } else {
@@ -3385,8 +3485,14 @@ HTML_TEMPLATE = r"""<!doctype html>
     // Phase 12: URL input placeholder text varies by mode. Static-mode users
     // need to paste the generated command into their terminal; server-mode
     // users have it submitted for them — same input box, opposite affordance.
-    const URL_PLACEHOLDER_SERVER = "Paste video URL to start preview…";
+    // Phase 15: server placeholder names the actual concurrency so users
+    // know how many URLs will run in parallel.
     const URL_PLACEHOLDER_STATIC = "Paste video URL — generates the /watch --preview command for you to paste in your terminal";
+
+    function serverUrlPlaceholder() {
+      const n = serverHealth.preview_concurrency || 2;
+      return `Paste one or more URLs (one per line). Server queues up to ${n} preview job${n === 1 ? "" : "s"} in parallel.`;
+    }
 
     function updateUrlPlaceholder(serverReachable) {
       const input = document.getElementById("url-input");
@@ -3395,7 +3501,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       // "reachable" so server-mode users see the server placeholder without
       // a flicker between page load and first poll.
       const useServer = SERVER_MODE && serverReachable !== false;
-      input.placeholder = useServer ? URL_PLACEHOLDER_SERVER : URL_PLACEHOLDER_STATIC;
+      input.placeholder = useServer ? serverUrlPlaceholder() : URL_PLACEHOLDER_STATIC;
     }
 
     function setConnIndicator(ok) {
@@ -3671,6 +3777,61 @@ HTML_TEMPLATE = r"""<!doctype html>
     if (SERVER_MODE) {
       setTimeout(refreshDisk, 600);
       setInterval(refreshDisk, 30000);
+    }
+
+    // ── Phase 15: queue panel — per-phase active + waiting counts ────────────
+
+    function refreshQueue() {
+      if (!SERVER_MODE) return;
+      fetch("/api/queue")
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) renderQueuePanel(data); })
+        .catch(() => { /* conn indicator owns failure surface */ });
+    }
+
+    function renderQueuePanel(state) {
+      const panel = document.getElementById("queue-panel");
+      const p = (state && state.preview) || { active: [], waiting: [] };
+      const s = (state && state.synthesis) || { active: [], waiting: [] };
+      const pa = p.active || [], pw = p.waiting || [];
+      const sa = s.active || [], sw = s.waiting || [];
+      const anything = pa.length + pw.length + sa.length + sw.length;
+      panel.hidden = anything === 0;
+      document.getElementById("queue-preview-active").textContent = `${pa.length} active`;
+      document.getElementById("queue-preview-waiting").textContent = `${pw.length} waiting`;
+      document.getElementById("queue-synthesis-active").textContent = `${sa.length} active`;
+      document.getElementById("queue-synthesis-waiting").textContent = `${sw.length} waiting`;
+      document.querySelector('.queue-clear[data-phase="preview"]').hidden = pw.length === 0;
+      document.querySelector('.queue-clear[data-phase="synthesis"]').hidden = sw.length === 0;
+      document.getElementById("queue-preview-active").dataset.ids = pa.join(",");
+      document.getElementById("queue-preview-waiting").dataset.ids = pw.join(",");
+      document.getElementById("queue-synthesis-active").dataset.ids = sa.join(",");
+      document.getElementById("queue-synthesis-waiting").dataset.ids = sw.join(",");
+    }
+
+    document.getElementById("queue-panel").addEventListener("click", e => {
+      if (e.target.classList.contains("queue-stat")) {
+        const ids = (e.target.dataset.ids || "").split(",").filter(Boolean);
+        if (ids.length === 0) { showToast("No jobs in this bucket"); return; }
+        const title = ids.length === 1 ? "Job inspect" : `Job inspect (1 of ${ids.length})`;
+        openJobModal(ids[0], title, "", null);
+      } else if (e.target.classList.contains("queue-clear")) {
+        const phase = e.target.dataset.phase;
+        if (!phase) return;
+        if (!confirm(`Cancel all waiting ${phase} jobs?`)) return;
+        fetch(`/api/queue/clear-waiting?phase=${encodeURIComponent(phase)}`, { method: "POST" })
+          .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || `HTTP ${r.status}`); }))
+          .then(data => {
+            showToast(`Cleared ${data.count} waiting ${phase} job${data.count === 1 ? "" : "s"}`);
+            refreshQueue();
+          })
+          .catch(err => showToast("Clear failed: " + err.message));
+      }
+    });
+
+    if (SERVER_MODE) {
+      setTimeout(refreshQueue, 700);
+      setInterval(refreshQueue, 3000);
     }
 
     // Stats bar click → disk modal
