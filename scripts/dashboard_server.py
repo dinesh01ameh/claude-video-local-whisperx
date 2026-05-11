@@ -121,6 +121,38 @@ def _variant_filenames(variant: str) -> tuple[str, str]:
     raise ValueError(f"unknown variant: {variant}")
 
 
+def _compute_synthesis_timeout(preview: dict, segments: list, default: int) -> int:
+    """Scale synthesis timeout to video duration + must-frame density.
+
+    Fixed timeouts break for 1hr+ videos. Floor at the user's env default so
+    explicit overrides never lower it; cap at 3600s — anything longer means
+    the user marked too many segments and should drop some.
+
+    Mirrors cmd_focused's frame-extraction sizing (target = min(60, max(4,
+    dur*2)) per must segment) so the estimate matches actual workload.
+    """
+    try:
+        duration_sec = float(preview.get("duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        duration_sec = 0.0
+    must_frame_count = 0
+    for s in segments or []:
+        if (s.get("type") or "").lower() != "must":
+            continue
+        try:
+            dur = (float(s["end_ms"]) - float(s["start_ms"])) / 1000.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dur <= 0:
+            continue
+        must_frame_count += min(60, max(4, int(dur * 2)))
+    base = 600
+    transcript_factor = duration_sec * 1.2  # ~1.2s per audio-second
+    frame_factor = must_frame_count * 5     # ~5s per must-frame
+    computed = int(base + transcript_factor + frame_factor)
+    return min(3600, max(default, computed))
+
+
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
 logger = logging.getLogger("dashboard_server")
@@ -276,12 +308,16 @@ def _spawn_synthesis(
     work_path: Path,
     focused_report_path: Path,
     variant: str = "main",
+    timeout_sec: int | None = None,
 ) -> None:
     """Spawn `claude -p <prompt>` and wire it into the job's synthesis phase.
 
     `variant` routes the output to slot-suffixed filenames (main keeps the
     originals; variant-a/b get -variant-a.md / -variant-b.md suffixes).
+    `timeout_sec` overrides SYNTHESIS_TIMEOUT_SEC per-job — used by the
+    dynamic-timeout path in /api/focused to scale with video duration.
     """
+    effective_timeout = SYNTHESIS_TIMEOUT_SEC if timeout_sec is None else int(timeout_sec)
     if not CLAUDE_BIN:
         _update_job(job_id, status="failed", error="claude CLI not on PATH")
         return
@@ -312,8 +348,8 @@ def _spawn_synthesis(
         prompt,
     ]
     logger.info(
-        "job %s synthesizing via claude (model=%s, effort=%s, timeout=%ds)",
-        job_id, SYNTHESIS_MODEL, SYNTHESIS_EFFORT, SYNTHESIS_TIMEOUT_SEC,
+        "job %s synthesizing via claude (model=%s, effort=%s, timeout=%ds, base=%ds)",
+        job_id, SYNTHESIS_MODEL, SYNTHESIS_EFFORT, effective_timeout, SYNTHESIS_TIMEOUT_SEC,
     )
     try:
         proc = subprocess.Popen(
@@ -398,7 +434,7 @@ def _spawn_synthesis(
 
     threading.Thread(
         target=_run_synthesis_with_timeout,
-        args=(job_id, proc, _verify_outputs, SYNTHESIS_TIMEOUT_SEC),
+        args=(job_id, proc, _verify_outputs, effective_timeout),
         daemon=True,
     ).start()
 
@@ -1007,11 +1043,24 @@ async def api_focused(req: Request):
 
     focused_report_path = work_path / "focused-report.md"
 
+    # Phase 14: scale synthesis timeout to video duration + must-frame density.
+    # Read preview.json (already next to focused-report.md in the work_dir);
+    # missing / unreadable preview falls back to the env-default timeout.
+    preview_data: dict = {}
+    try:
+        preview_data = json.loads((work_path / "preview.json").read_text(encoding="utf-8"))
+        if not isinstance(preview_data, dict):
+            preview_data = {}
+    except (OSError, json.JSONDecodeError):
+        preview_data = {}
+    synthesis_timeout = _compute_synthesis_timeout(preview_data, segments, SYNTHESIS_TIMEOUT_SEC)
+
     job_id = _new_job(
         "focused",
         auto_synthesize=auto_synthesize,
         work_dir=str(work_path),
         variant=variant,
+        synthesis_timeout_sec=synthesis_timeout,
     )
 
     def _on_extract_done(full_lines: list[str]) -> None:
@@ -1035,7 +1084,7 @@ async def api_focused(req: Request):
             return
 
         # Chain synthesis
-        _spawn_synthesis(job_id, work_path, focused_report_path, variant)
+        _spawn_synthesis(job_id, work_path, focused_report_path, variant, timeout_sec=synthesis_timeout)
 
     seg_json = json.dumps(segments, ensure_ascii=False)
     args = [

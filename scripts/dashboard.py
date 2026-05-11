@@ -1088,6 +1088,36 @@ HTML_TEMPLATE = r"""<!doctype html>
       .compare-columns.cols-2, .compare-columns.cols-3 { grid-template-columns: 1fr; }
       .compare-columns.cols-3 .compare-col:last-child { grid-column: auto; }
     }
+
+    /* Phase 14: marker-modal meta strip — creator description + chapters */
+    .marker-meta {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 8px 18px; border-bottom: 1px solid var(--border); background: var(--bg);
+    }
+    .marker-meta[hidden] { display: none; }
+    .marker-creator-intent { flex: 1 1 auto; min-width: 0; }
+    .marker-creator-intent summary {
+      cursor: pointer; padding: 4px 0; font-size: 11px; color: var(--muted);
+      user-select: none; text-transform: uppercase; letter-spacing: 0.5px;
+      font-weight: 500;
+    }
+    .marker-creator-intent summary:hover { color: var(--accent); }
+    .marker-creator-intent-body {
+      margin: 6px 0 0; padding: 8px 10px; max-height: 180px; overflow-y: auto;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+      white-space: pre-wrap; word-break: break-word;
+      font: 12px/1.5 -apple-system, sans-serif; color: var(--text);
+    }
+    .marker-chapter-btn {
+      background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
+      padding: 6px 12px; border-radius: 4px; font: 11px inherit; cursor: pointer;
+      font-weight: 500; white-space: nowrap;
+    }
+    .marker-chapter-btn:hover { background: var(--accent); color: var(--bg); }
+    .marker-chapter-btn[hidden] { display: none; }
+    .marker-chapter-count {
+      font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
@@ -1197,6 +1227,18 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="marker-toolbar-help">
         Default: transcript everywhere, no frames. M adds frames where visuals matter. X drops a range entirely.
+      </div>
+
+      <!-- Phase 14: creator-supplied framing (description + chapters) -->
+      <div class="marker-meta" id="marker-meta" hidden>
+        <details class="marker-creator-intent" id="marker-creator-intent-details" hidden>
+          <summary>Creator's stated intent (from YouTube description)</summary>
+          <div class="marker-creator-intent-body" id="marker-creator-intent-body"></div>
+        </details>
+        <button id="marker-apply-chapters" class="marker-chapter-btn" hidden>
+          Suggested markers from chapters
+        </button>
+        <span class="marker-chapter-count" id="marker-chapter-count"></span>
       </div>
 
       <div class="modal-body marker-body">
@@ -1504,6 +1546,31 @@ HTML_TEMPLATE = r"""<!doctype html>
     function getAnnot(id) {
       return state[id] || { nlm_pasted: false, project_tag: "None", note: "" };
     }
+
+    /** Phase 14: pre-select a project tag in the dropdown when the video's
+     *  description mentions one. Visual-only (doesn't persist) until the
+     *  user explicitly picks a value — keeps localStorage as the source of
+     *  truth and lets the user override silently. Returns null on no match. */
+    function suggestProjectTag(description) {
+      if (!description) return null;
+      const text = String(description).toLowerCase();
+      // First pass: full-tag match (so Amrocky-Migration-Tool wins over generic Amrocky).
+      for (const tag of PROJECT_TAGS) {
+        if (tag === "None") continue;
+        if (text.includes(tag.toLowerCase())) return tag;
+      }
+      // Second pass: tag-prefix match, word-boundary anchored to avoid
+      // false positives like 'PKC' in 'pickle'.
+      for (const tag of PROJECT_TAGS) {
+        if (tag === "None") continue;
+        const prefix = tag.split("-")[0].toLowerCase();
+        if (prefix.length < 3) continue;  // very short prefixes are unsafe
+        try {
+          if (new RegExp(`\\b${prefix}\\b`, "i").test(text)) return tag;
+        } catch { /* skip on regex errors */ }
+      }
+      return null;
+    }
     function setAnnot(id, patch) {
       state[id] = { ...getAnnot(id), ...patch, marked_at: new Date().toISOString() };
       saveState(state);
@@ -1778,8 +1845,15 @@ HTML_TEMPLATE = r"""<!doctype html>
         const tagsForRow = PROJECT_TAGS.slice();
         if (a.project_tag && !tagsForRow.includes(a.project_tag)) tagsForRow.push(a.project_tag);
         if (!tagsForRow.includes("None")) tagsForRow.unshift("None");
+        // Phase 14: if user hasn't tagged this row yet and the description
+        // hints at a project, surface the suggestion in the dropdown.
+        let effectiveTag = a.project_tag;
+        if (!state[r.id] && (!effectiveTag || effectiveTag === "None")) {
+          const suggested = suggestProjectTag(r.description_excerpt);
+          if (suggested && tagsForRow.includes(suggested)) effectiveTag = suggested;
+        }
         const projectOptions = tagsForRow.map(t =>
-          `<option value="${escapeHtml(t)}" ${t === a.project_tag ? "selected" : ""}>${t === "None" ? "(none)" : escapeHtml(t)}</option>`
+          `<option value="${escapeHtml(t)}" ${t === effectiveTag ? "selected" : ""}>${t === "None" ? "(none)" : escapeHtml(t)}</option>`
         ).join("");
 
         // Phase 12: legacy rows (created before --preview existed) have no
@@ -1824,7 +1898,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <td><span class="badge ${tBadge}">${tBadge}${tCount}</span></td>
           <td><span class="badge ${status}">${status}</span></td>
           <td class="tag-cell">
-            <select data-action="tag" class="${a.project_tag && a.project_tag !== 'None' ? 'tagged' : ''}">${projectOptions}</select>
+            <select data-action="tag" class="${effectiveTag && effectiveTag !== 'None' ? 'tagged' : ''}">${projectOptions}</select>
           </td>
           <td class="nlm-cell">
             <input type="checkbox" data-action="nlm" ${a.nlm_pasted ? "checked" : ""} title="Mark pasted to NLM">
@@ -1989,10 +2063,98 @@ HTML_TEMPLATE = r"""<!doctype html>
       renderMarkerFrames(preview);
       renderMarkerTranscript(preview);
       renderMarkerSegments();
+      renderMarkerMeta(rec, preview);
       startPlayheadLoop();
 
       document.getElementById("marker-modal-bg").classList.add("show");
     }
+
+    /** Phase 14: populate the meta strip — creator's intent + chapter button. */
+    function renderMarkerMeta(rec, preview) {
+      const meta = document.getElementById("marker-meta");
+      const intentDetails = document.getElementById("marker-creator-intent-details");
+      const intentBody = document.getElementById("marker-creator-intent-body");
+      const chBtn = document.getElementById("marker-apply-chapters");
+      const chCount = document.getElementById("marker-chapter-count");
+
+      const desc = (preview && preview.description)
+        || (rec && rec.description_excerpt)
+        || "";
+      const chapters = (preview && Array.isArray(preview.chapters)) ? preview.chapters : [];
+
+      if (desc) {
+        intentBody.textContent = desc;
+        intentDetails.hidden = false;
+        intentDetails.open = false;
+      } else {
+        intentDetails.hidden = true;
+      }
+      if (chapters.length > 0) {
+        chBtn.hidden = false;
+        chCount.textContent = `${chapters.length} chapter${chapters.length === 1 ? "" : "s"} available`;
+      } else {
+        chBtn.hidden = true;
+        chCount.textContent = "";
+      }
+      meta.hidden = !(desc || chapters.length > 0);
+    }
+
+    /** Heuristic chapter classifier — title text drives must / exclude / skip. */
+    function classifyChapter(title, idx, total) {
+      const t = (title || "").toLowerCase();
+      if (idx === 0 && /\b(intro|introduction|welcome|overview|hello)\b/.test(t)) return "exclude";
+      if (idx === total - 1 && /\b(outro|conclusion|recap|subscribe|wrap[- ]?up|thanks for watching)\b/.test(t)) return "exclude";
+      if (/\b(demo|example|walkthrough|live|code|slide|screen|implementation|tutorial|build)/.test(t)) return "must";
+      return null;
+    }
+
+    function applyChapterMarkers() {
+      if (!markerCurrentId) return;
+      const preview = PREVIEWS[markerCurrentId];
+      const chapters = (preview && Array.isArray(preview.chapters)) ? preview.chapters : [];
+      if (chapters.length === 0) {
+        showToast("No chapters available on this video");
+        return;
+      }
+      const draft = getMarker(markerCurrentId);
+      if (draft.segments && draft.segments.length > 0) {
+        const n = draft.segments.length;
+        if (!confirm(`Replace your ${n} existing segment${n === 1 ? "" : "s"} with chapter suggestions?`)) return;
+      }
+      const dur = durationMs();
+      const total = chapters.length;
+      const newSegments = [];
+      chapters.forEach((ch, idx) => {
+        const startMs = Math.round((Number(ch.start_time) || 0) * 1000);
+        let endMs;
+        if (ch.end_time != null && isFinite(Number(ch.end_time))) {
+          endMs = Math.round(Number(ch.end_time) * 1000);
+        } else if (idx + 1 < total) {
+          endMs = Math.round((Number(chapters[idx + 1].start_time) || 0) * 1000);
+        } else {
+          endMs = dur || (startMs + 1000);
+        }
+        if (endMs <= startMs) return;
+        const type = classifyChapter(ch.title, idx, total);
+        if (!type) return;
+        newSegments.push({
+          id: newSegId(),
+          type,
+          start_ms: startMs,
+          end_ms: endMs,
+          intent: (ch.title || "").trim(),
+        });
+      });
+      if (newSegments.length === 0) {
+        showToast("No chapters matched the heuristics — mark manually");
+        return;
+      }
+      setMarker(markerCurrentId, { segments: newSegments, active: null });
+      renderMarkerSegments();
+      showToast(`Pre-populated ${newSegments.length} segment${newSegments.length === 1 ? "" : "s"} from chapters — review and adjust`);
+    }
+
+    document.getElementById("marker-apply-chapters").addEventListener("click", applyChapterMarkers);
 
     function closeMarker() {
       document.getElementById("marker-modal-bg").classList.remove("show");

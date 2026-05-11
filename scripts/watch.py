@@ -162,6 +162,17 @@ def cmd_preview(args) -> int:
 
     info = dl.get("info") or {}
 
+    # Phase 14: capture creator-supplied metadata that yt-dlp already fetched.
+    # Description (capped at 4000 chars to keep preview.json reasonable),
+    # chapter list, and categories. These feed the marker UI (Creator's
+    # intent + chapter suggestions) and focused-mode synthesis prompt.
+    description_full = (info.get("description") or "") if isinstance(info, dict) else ""
+    description = description_full[:4000]
+    chapters_raw = info.get("chapters") if isinstance(info, dict) else None
+    chapters = chapters_raw if isinstance(chapters_raw, list) else []
+    categories_raw = info.get("categories") if isinstance(info, dict) else None
+    categories = categories_raw if isinstance(categories_raw, list) else []
+
     preview_data = {
         "video_path": str(video_path),
         "duration_seconds": full_duration,
@@ -183,6 +194,9 @@ def cmd_preview(args) -> int:
             for seg in transcript_segments
         ],
         "transcript_source": transcript_source or "none",
+        "description": description,
+        "chapters": chapters,
+        "categories": categories,
     }
     (work / "preview.json").write_text(json.dumps(preview_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -206,6 +220,10 @@ def cmd_preview(args) -> int:
         "first_frame_path": str(frames_list[0]["path"]) if frames_list else None,
         "video_path": str(video_path),
         "state": "preview-ready",
+        "description_excerpt": description[:500],
+        "has_chapters": bool(chapters),
+        "chapter_count": len(chapters),
+        "categories": categories,
     }
 
     if project_dir is not None:
@@ -386,8 +404,31 @@ def cmd_focused(args) -> int:
     print()
     print("# /watch focused: process this video")
     print()
+
+    # Phase 14: surface creator-supplied framing (description + chapters) so
+    # Claude reads it before frames. Strong top-of-document signal.
+    description = (preview.get("description") or "").strip()
+    chapters_data = preview.get("chapters") or []
+    if description:
+        print("## Creator's stated intent (from YouTube description)")
+        print()
+        # Block-quote each line so multi-paragraph descriptions render readably.
+        for line in description.splitlines():
+            print(f"> {line}" if line else ">")
+        print()
+    if isinstance(chapters_data, list) and chapters_data:
+        print("## Chapters (from creator)")
+        print()
+        for ch in chapters_data:
+            try:
+                start_s = float(ch.get("start_time") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            title = str(ch.get("title") or "").strip() or "(untitled)"
+            print(f"- {format_time(start_s)} {title}")
+        print()
     if args.user_review:
-        print("## User context")
+        print("## User context (marker editor)")
         print()
         print(f"> {args.user_review}")
         print()
