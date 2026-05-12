@@ -1124,6 +1124,37 @@ HTML_TEMPLATE = r"""<!doctype html>
       font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
     }
 
+    /* Phase 16: bulk export modal */
+    .export-modal { max-width: 560px; }
+    .export-summary { color: var(--muted); font-size: 12px; margin: 0 0 14px; line-height: 1.5; }
+    .export-content-type {
+      border: 1px solid var(--border); border-radius: 5px;
+      padding: 8px 14px 12px; margin: 0 0 14px;
+    }
+    .export-content-type legend {
+      padding: 0 8px; color: var(--muted); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;
+    }
+    .export-content-type label {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 5px 0; cursor: pointer; font-size: 13px; line-height: 1.4;
+    }
+    .export-content-type label:hover { color: var(--accent); }
+    .export-content-type input[type=radio] {
+      margin-top: 3px; accent-color: var(--accent); cursor: pointer;
+    }
+    .export-content-type strong { color: var(--text); font-weight: 600; }
+    .export-rows summary {
+      cursor: pointer; padding: 6px 0; font-size: 12px; color: var(--muted); user-select: none;
+    }
+    .export-rows summary:hover { color: var(--text); }
+    .export-rows ol {
+      margin: 6px 0 0; padding-left: 24px; max-height: 220px; overflow-y: auto;
+      font-size: 12px; color: var(--text);
+    }
+    .export-rows li { padding: 2px 0; line-height: 1.4; }
+    .export-rows li.missing { color: var(--muted); font-style: italic; }
+
     /* Phase 15: queue panel (per-phase active + waiting counts) + waiting badge */
     .job-status.waiting { color: var(--muted); border-color: var(--border); }
     .queue-panel {
@@ -1218,6 +1249,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <div class="bulk-bar" id="bulk-bar">
     <span class="count" id="bulk-count">0 selected</span>
     <button id="bulk-clear">Clear</button>
+    <button id="bulk-export-btn">Export selected</button>
     <button id="bulk-delete-btn" class="danger">Delete selected</button>
   </div>
 
@@ -1374,6 +1406,39 @@ HTML_TEMPLATE = r"""<!doctype html>
             <button data-variant="variant-b">Save as Variant B</button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bulk export modal (Phase 16) -->
+  <div class="modal-bg" id="export-modal-bg">
+    <div class="modal export-modal">
+      <div class="modal-head">
+        <h2 id="export-modal-title">Export records</h2>
+        <button id="export-modal-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="export-summary" id="export-modal-summary"></p>
+        <fieldset class="export-content-type">
+          <legend>Content type</legend>
+          <label><input type="radio" name="export-content" value="nlm" checked>
+            <strong>NLM summaries</strong> — concise, NLM-paste format (recommended)
+          </label>
+          <label><input type="radio" name="export-content" value="result">
+            <strong>Focused results</strong> — full analysis, verbose
+          </label>
+          <label><input type="radio" name="export-content" value="both">
+            <strong>Both</strong> — focused result + NLM summary per row
+          </label>
+        </fieldset>
+        <details class="export-rows">
+          <summary>Rows to include</summary>
+          <ol id="export-rows-list"></ol>
+        </details>
+      </div>
+      <div class="modal-foot">
+        <button id="export-cancel" class="secondary">Cancel</button>
+        <button id="export-confirm" class="primary">Export</button>
       </div>
     </div>
   </div>
@@ -2855,6 +2920,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         document.getElementById("confirm-modal-bg").classList.remove("show");
         document.getElementById("orphans-modal-bg").classList.remove("show");
         document.getElementById("disk-modal-bg").classList.remove("show");
+        document.getElementById("export-modal-bg").classList.remove("show");
         closeCompareModal();
         closeMarker();
       }
@@ -3711,6 +3777,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       bar.classList.add("show");
       document.getElementById("bulk-count").textContent = `${count} selected`;
       document.getElementById("bulk-delete-btn").textContent = `Delete ${count} selected`;
+      document.getElementById("bulk-export-btn").textContent = `Export ${count} selected`;
     }
 
     // Header "select all" — affects only currently filtered rows.
@@ -3737,6 +3804,114 @@ HTML_TEMPLATE = r"""<!doctype html>
       updateBulkBar();
     });
     document.getElementById("bulk-delete-btn").addEventListener("click", bulkDeleteFlow);
+
+    // ── Phase 16: bulk export modal + flow ───────────────────────────────────
+
+    function exportTimestamp() {
+      const d = new Date();
+      const pad = n => String(n).padStart(2, "0");
+      return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    }
+
+    function openExportModal() {
+      const ids = Array.from(selectedIds);
+      if (ids.length === 0) return;
+      document.getElementById("export-modal-title").textContent =
+        `Export ${ids.length} record${ids.length === 1 ? "" : "s"}`;
+      document.getElementById("export-modal-summary").textContent =
+        SERVER_MODE
+          ? "Concatenates the selected rows into a single markdown file with a TOC + per-record sections. Saved to your Downloads folder via the browser."
+          : "Static mode: a PowerShell command will be copied to your clipboard. Paste in a terminal to write the file to Downloads.";
+      const rowsList = document.getElementById("export-rows-list");
+      rowsList.innerHTML = ids.map(id => {
+        const r = RECORDS.find(x => x.id === id);
+        if (!r) return `<li class="missing">${escapeHtml(id)} (not in manifest — will be skipped)</li>`;
+        const meta = [r.uploader, (r.started_at || "").slice(0, 10)].filter(Boolean).join(" · ");
+        const label = `${r.title || "(no title)"}${meta ? ` — ${meta}` : ""}`;
+        return `<li>${escapeHtml(label)}</li>`;
+      }).join("");
+      // Reset to default radio every open
+      const nlmRadio = document.querySelector('input[name="export-content"][value="nlm"]');
+      if (nlmRadio) nlmRadio.checked = true;
+      document.getElementById("export-modal-bg").classList.add("show");
+    }
+
+    function closeExportModal() {
+      document.getElementById("export-modal-bg").classList.remove("show");
+    }
+
+    async function doExport() {
+      const ids = Array.from(selectedIds);
+      if (ids.length === 0) return;
+      const checked = document.querySelector('input[name="export-content"]:checked');
+      const contentType = (checked && checked.value) || "nlm";
+      closeExportModal();
+
+      if (SERVER_MODE) {
+        let res;
+        try {
+          res = await fetch("/api/export-bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids, content_type: contentType }),
+          });
+        } catch (err) {
+          showToast("Export failed: " + err.message);
+          return;
+        }
+        if (!res.ok) {
+          let detail;
+          try { detail = (await res.json()).detail; } catch { detail = await res.text(); }
+          showToast(`Export failed: ${detail || `HTTP ${res.status}`}`);
+          return;
+        }
+        // Honor Content-Disposition filename when present; fall back to a sane default.
+        let filename = `watch-export-${exportTimestamp()}.md`;
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename="?([^";]+)"?/);
+        if (m) filename = m[1];
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+        const count = res.headers.get("X-Watch-Records") || ids.length;
+        showToast(`Exported ${count} record${String(count) === "1" ? "" : "s"} — saved as ${filename}`);
+      } else {
+        // Static mode: build a PowerShell Get-Content | Set-Content one-liner.
+        const fileNames = contentType === "result" ? ["focused-result.md"]
+                        : contentType === "both" ? ["focused-result.md", "nlm-summary.md"]
+                        : ["nlm-summary.md"];
+        const paths = [];
+        ids.forEach(id => {
+          const r = RECORDS.find(x => x.id === id);
+          if (!r || !r.work_dir) return;
+          const wd = r.work_dir.replace(/\\/g, "/");
+          fileNames.forEach(fn => paths.push(`'${wd}/${fn}'`));
+        });
+        if (paths.length === 0) {
+          showToast("Nothing to export — no valid work_dir on selected rows");
+          return;
+        }
+        const stamp = exportTimestamp();
+        const cmd = `Get-Content @(${paths.join(", ")}) | Set-Content -Path "$env:USERPROFILE\\Downloads\\watch-export-${stamp}.md"`;
+        navigator.clipboard.writeText(cmd).then(
+          () => showToast("Export command copied — paste in PowerShell to write the file"),
+          () => showToast("Couldn't copy — check clipboard permissions")
+        );
+      }
+    }
+
+    document.getElementById("bulk-export-btn").addEventListener("click", openExportModal);
+    document.getElementById("export-modal-close").addEventListener("click", closeExportModal);
+    document.getElementById("export-cancel").addEventListener("click", closeExportModal);
+    document.getElementById("export-confirm").addEventListener("click", doExport);
+    document.getElementById("export-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "export-modal-bg") closeExportModal();
+    });
 
     // Hook into existing row event delegation for select-row + delete-record
     document.getElementById("rows").addEventListener("change", e => {

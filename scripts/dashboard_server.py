@@ -34,7 +34,7 @@ from typing import Any, Callable
 
 try:
     from fastapi import FastAPI, HTTPException, Request
-    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
     import uvicorn
 except ImportError:
     print(
@@ -1364,6 +1364,174 @@ async def api_records_bulk_delete(req: Request):
         logger.exception("dashboard regen after bulk-delete failed (non-fatal)")
     logger.info("bulk-delete: %d/%d ok, freed %d bytes", sum(1 for r in results if r["deleted"]), len(results), total_freed)
     return {"results": results, "total_freed_bytes": total_freed}
+
+
+# Phase 16: bulk export cap. Refuse rather than silently produce a giant
+# file the browser will struggle to download.
+EXPORT_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _format_duration_short(seconds) -> str:
+    """MM:SS or H:MM:SS for the export TOC. Returns empty on bad input."""
+    try:
+        s = int(float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0:
+        return ""
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
+
+@app.post("/api/export-bulk")
+async def api_export_bulk(req: Request):
+    """Concatenate selected records' .md outputs into a single download.
+
+    content_type:
+      "nlm"    → nlm-summary.md only (concise, NLM-paste)
+      "result" → focused-result.md only (verbose)
+      "both"   → focused-result.md then nlm-summary.md, with subheadings
+
+    Path safety: every work_dir is rewritten + validated to live under
+    .watch-cache/, so a malformed id can't read arbitrary files.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+
+    ids_raw = body.get("ids") or []
+    content_type = (body.get("content_type") or "nlm").strip().lower()
+    if content_type not in ("nlm", "result", "both"):
+        raise HTTPException(400, "content_type must be 'nlm', 'result', or 'both'")
+    if not isinstance(ids_raw, list) or not ids_raw:
+        raise HTTPException(400, "ids must be a non-empty array")
+
+    # Dedupe preserving submission order — user clicked rows in some order
+    # and probably wants the export to reflect that.
+    seen: set[str] = set()
+    ids: list[str] = []
+    for rid in ids_raw:
+        if not isinstance(rid, str) or rid in seen:
+            continue
+        seen.add(rid)
+        ids.append(rid)
+
+    records = _read_manifest_records()
+    by_id = {r.get("id"): r for r in records if r.get("id")}
+    resolved = [by_id[r] for r in ids if r in by_id]
+    if not resolved:
+        raise HTTPException(404, "no matching records in manifest")
+
+    content_label = {
+        "nlm": "NLM summaries",
+        "result": "Focused results (verbose)",
+        "both": "Focused results + NLM summaries",
+    }[content_type]
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    parts: list[str] = [
+        "# /watch bulk export\n\n",
+        f"**Generated:** {generated_at}\n",
+        f"**Records:** {len(resolved)} video{'' if len(resolved) == 1 else 's'}\n",
+        f"**Content:** {content_label}\n\n",
+        "## Table of contents\n\n",
+    ]
+    for i, rec in enumerate(resolved, 1):
+        title = rec.get("title") or "(no title)"
+        meta_bits = [
+            rec.get("uploader") or "",
+            _format_duration_short(rec.get("duration_seconds")),
+            (rec.get("started_at") or "")[:10],
+        ]
+        meta = " · ".join(b for b in meta_bits if b)
+        suffix = f" — {meta}" if meta else ""
+        parts.append(f"{i}. [{title}](#video-{i}){suffix}\n")
+    parts.append("\n---\n\n")
+
+    total_bytes = sum(len(p.encode("utf-8")) for p in parts)
+
+    for i, rec in enumerate(resolved, 1):
+        section: list[str] = []
+        title = rec.get("title") or "(no title)"
+        section.append(f"## Video {i}: {title}\n\n")
+        section.append(f"**Source:** {rec.get('source') or '(unknown)'}\n")
+        section.append(f"**Watched:** {(rec.get('started_at') or '')[:10] or '(unknown)'}\n")
+        work_dir = _rewrite_path(rec.get("work_dir") or "", PROJECT_DIR)
+        section.append(f"**Work dir:** {work_dir or '(none)'}\n\n")
+
+        missing: list[str] = []
+        try:
+            work_path = _validate_workdir_under_cache(work_dir) if work_dir else None
+        except HTTPException as exc:
+            work_path = None
+            missing.append(f"work_dir invalid: {exc.detail}")
+
+        if work_path is not None and work_path.exists():
+            # Order matters for "both": verbose then concise mirrors what
+            # the dashboard's Compare modal does.
+            files: list[tuple[str, str | None]] = []
+            if content_type in ("result", "both"):
+                heading = "### Focused result (verbose)\n\n" if content_type == "both" else None
+                files.append(("focused-result.md", heading))
+            if content_type in ("nlm", "both"):
+                heading = "### NLM-ready summary\n\n" if content_type == "both" else None
+                files.append(("nlm-summary.md", heading))
+
+            for fname, heading in files:
+                fpath = work_path / fname
+                if not fpath.exists():
+                    missing.append(fname)
+                    continue
+                try:
+                    text = fpath.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    missing.append(f"{fname} (read failed: {exc})")
+                    continue
+                if heading:
+                    section.append(heading)
+                section.append(text)
+                if not text.endswith("\n"):
+                    section.append("\n")
+                section.append("\n")
+        elif not missing:
+            missing.append("work_dir does not exist on disk")
+
+        if missing:
+            section.append("### Missing files\n\n")
+            for m in missing:
+                section.append(f"- `{m}`\n")
+            section.append("\n")
+
+        section.append("---\n\n")
+        text = "".join(section)
+        total_bytes += len(text.encode("utf-8"))
+        if total_bytes > EXPORT_MAX_BYTES:
+            raise HTTPException(
+                413,
+                f"Export exceeds {EXPORT_MAX_BYTES // (1024 * 1024)} MB cap at record "
+                f"{i}/{len(resolved)}. Select fewer rows and retry.",
+            )
+        parts.append(text)
+
+    body_text = "".join(parts)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    logger.info(
+        "export-bulk: %d records, content=%s, %d bytes",
+        len(resolved), content_type, total_bytes,
+    )
+    return Response(
+        content=body_text,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="watch-export-{stamp}.md"',
+            "X-Watch-Records": str(len(resolved)),
+            "X-Watch-Bytes": str(total_bytes),
+        },
+    )
 
 
 @app.get("/api/orphans")
