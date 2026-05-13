@@ -1124,6 +1124,120 @@ HTML_TEMPLATE = r"""<!doctype html>
       font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
     }
 
+    /* Phase 17: hierarchical categories */
+    .view-toggle {
+      display: inline-flex; margin-left: 6px;
+      border: 1px solid var(--border); border-radius: 4px; overflow: hidden;
+    }
+    .view-toggle .view-btn {
+      background: var(--bg); color: var(--muted); border: none;
+      padding: 5px 10px; font: 11px inherit; cursor: pointer;
+    }
+    .view-toggle .view-btn:hover { color: var(--text); }
+    .view-toggle .view-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+
+    .cat-cell select {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 4px 6px; border-radius: 4px; font: 12px inherit; min-width: 130px;
+      max-width: 180px;
+    }
+    .cat-cell select.tagged { border-color: var(--accent); color: var(--accent); }
+    .cat-cell select.suggested {
+      border-color: var(--amber); border-style: dashed; color: var(--amber);
+    }
+    .cat-cell select.tagged.suggested {
+      border-style: dashed;
+    }
+
+    /* Tree-view section + subsection rows (both live in the #rows tbody) */
+    .tree-section-row td, .tree-subsection-row td {
+      padding: 0;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .tree-subsection-row td {
+      background: var(--bg);
+      padding: 6px 18px 6px 36px;
+      color: var(--muted); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .tree-section-row td { padding: 0; }
+    .tree-toggle {
+      display: flex; align-items: center; gap: 10px;
+      width: 100%; padding: 10px 18px;
+      background: none; border: none; color: var(--text);
+      cursor: pointer; font: 13px inherit; font-weight: 600;
+      text-align: left;
+    }
+    .tree-toggle:hover { background: rgba(122, 166, 255, 0.04); }
+    .tree-caret { color: var(--accent); width: 14px; display: inline-block; }
+    .tree-name { color: var(--text); flex: 1; }
+    .tree-count {
+      color: var(--muted); font-size: 11px; font-weight: 400;
+      font-variant-numeric: tabular-nums;
+    }
+    .tree-sub-name { color: var(--text); margin-right: 10px; font-size: 12px; }
+    /* In tree view, sticky thead would overlap section headers — disable */
+    html.view-tree thead th { position: static; }
+
+    /* Manage Categories modal */
+    .categories-modal { max-width: 560px; }
+    .categories-help { color: var(--muted); font-size: 12px; margin: 0 0 14px; line-height: 1.5; }
+    .categories-list { list-style: none; padding: 0; margin: 0 0 14px; }
+    .categories-list li.cat-root {
+      border: 1px solid var(--border); border-radius: 4px;
+      margin-bottom: 6px; background: var(--bg);
+    }
+    .categories-list .cat-row {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      font-size: 13px;
+    }
+    .categories-list .cat-children {
+      list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--border);
+    }
+    .categories-list li.cat-child {
+      display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 22px;
+      font-size: 12px; background: var(--panel);
+      border-top: 1px solid var(--border);
+    }
+    .categories-list li.cat-child:first-child { border-top: none; }
+    .categories-list .cat-name { flex: 1; color: var(--text); }
+    .categories-list .cat-name.editing { padding: 0; }
+    .categories-list .cat-name input {
+      background: var(--bg); color: var(--text); border: 1px solid var(--accent);
+      padding: 3px 7px; border-radius: 3px; font: inherit;
+    }
+    .categories-list .cat-count {
+      color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+    }
+    .categories-list button.icon {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 3px 8px; border-radius: 3px; cursor: pointer; font: 11px inherit;
+    }
+    .categories-list button.icon:hover { color: var(--accent); border-color: var(--accent); }
+    .categories-list button.icon.del:hover { color: var(--red); border-color: var(--red); }
+    .categories-add { display: flex; gap: 8px; }
+    .categories-add input {
+      flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      padding: 7px 10px; border-radius: 4px; font: 13px inherit;
+    }
+    .categories-add input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+    .categories-add button {
+      background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent);
+      padding: 7px 14px; border-radius: 4px; font: 13px inherit; cursor: pointer;
+    }
+    .categories-add button:hover { background: var(--accent); color: var(--bg); }
+    .categories-validation {
+      margin-top: 8px; padding: 6px 10px; font-size: 12px;
+      color: var(--red); border: 1px solid var(--red); border-radius: 3px;
+      background: rgba(213, 107, 107, 0.08);
+    }
+    .categories-empty {
+      color: var(--muted); font-style: italic; padding: 12px;
+      text-align: center; border: 1px dashed var(--border); border-radius: 4px;
+    }
+
     /* Phase 16: bulk export modal */
     .export-modal { max-width: 560px; }
     .export-summary { color: var(--muted); font-size: 12px; margin: 0 0 14px; line-height: 1.5; }
@@ -1190,8 +1304,13 @@ HTML_TEMPLATE = r"""<!doctype html>
   <div class="topbar">
     <h1>/watch dashboard</h1>
     <span class="meta">regenerated {{GENERATED_AT}}</span>
+    <span class="view-toggle" id="view-toggle" title="Switch between table and tree view">
+      <button class="view-btn" data-view="table">Table</button>
+      <button class="view-btn" data-view="tree">Tree</button>
+    </span>
     <span class="conn-indicator" id="conn-indicator" title="Server connection status"></span>
     <button id="manage-projects-btn" class="topbar-btn" title="Add, rename, or delete project tags">Manage projects</button>
+    <button id="manage-categories-btn" class="topbar-btn" title="Add, rename, or delete categories">Manage categories</button>
   </div>
 
   <div class="urlbar">
@@ -1243,6 +1362,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     <select id="filter-project">
       <option value="">All projects</option>
     </select>
+    <select id="filter-category">
+      <option value="">All categories</option>
+    </select>
     <button class="clear" id="clear-filters">Clear filters</button>
   </div>
 
@@ -1265,6 +1387,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <th data-sort="transcript_source">Transcript</th>
         <th data-sort="status">Status</th>
         <th data-sort="project_tag">Project</th>
+        <th data-sort="category_path">Category</th>
         <th data-sort="nlm_pasted">NLM</th>
         <th>Notes</th>
         <th>Actions</th>
@@ -1496,6 +1619,31 @@ HTML_TEMPLATE = r"""<!doctype html>
     </div>
   </div>
 
+  <!-- Phase 17: Manage Categories modal -->
+  <div class="modal-bg" id="categories-modal-bg">
+    <div class="modal categories-modal">
+      <div class="modal-head">
+        <h2>Manage categories</h2>
+        <button id="categories-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="categories-help">
+          Two-level hierarchy (parent / child). Selecting a parent in a filter also matches its children.
+          Renaming a parent updates every child's path; deleting clears the tag on any tagged rows.
+        </p>
+        <ul id="categories-list" class="categories-list"></ul>
+        <div class="categories-add">
+          <input id="categories-add-input" type="text" placeholder="New root category name (≤32 chars, no '/')" maxlength="32">
+          <button id="categories-add-btn">Add root</button>
+        </div>
+        <div class="categories-validation" id="categories-validation" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button id="categories-reset" class="link">Reset to defaults</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Confirm delete modal (per-row, bulk, and orphan deletes share this) -->
   <div class="modal-bg" id="confirm-modal-bg">
     <div class="modal confirm-modal">
@@ -1599,6 +1747,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     const UI_KEY = "watch_dashboard_ui";
     const MARKERS_KEY = "watch_dashboard_markers";
     const PROJECTS_KEY = "watch_dashboard_projects";
+    // Phase 17: hierarchical categories (parent/child, depth max 2).
+    // Flat array of paths separated by "/". Same per-browser persistence
+    // model as projects/notes/NLM-paste; no server-side coupling.
+    const CATEGORIES_KEY = "watch_dashboard_categories";
+    const VIEW_MODE_KEY = "watch_dashboard_view_mode";
+    const TREE_EXPAND_KEY = "watch_dashboard_tree_expand";
+    const CATEGORIES_SEED = ["Claude Code", "Hermes Agent", "UI Design", "NotebookLM"];
 
     // Project tags: seeded from server-side PROJECT_TAGS_SEED on first load.
     // After any edit, localStorage becomes the source of truth.
@@ -1616,6 +1771,148 @@ HTML_TEMPLATE = r"""<!doctype html>
       catch { showToast("Couldn't save projects: localStorage full?"); }
     }
     let PROJECT_TAGS = loadProjects();
+
+    // ── Phase 17: hierarchical categories ──────────────────────────────────
+    function loadCategories() {
+      try {
+        const raw = localStorage.getItem(CATEGORIES_KEY);
+        if (!raw) return CATEGORIES_SEED.slice();
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr) || arr.length === 0) return CATEGORIES_SEED.slice();
+        return arr.filter(s => typeof s === "string" && s.trim().length > 0);
+      } catch { return CATEGORIES_SEED.slice(); }
+    }
+    function saveCategories(arr) {
+      try { localStorage.setItem(CATEGORIES_KEY, JSON.stringify(arr)); }
+      catch { showToast("Couldn't save categories: localStorage full?"); }
+    }
+    let CATEGORIES = loadCategories();
+
+    function loadViewMode() {
+      try { return localStorage.getItem(VIEW_MODE_KEY) || "table"; }
+      catch { return "table"; }
+    }
+    function saveViewMode(m) {
+      try { localStorage.setItem(VIEW_MODE_KEY, m); } catch {}
+    }
+    let viewMode = loadViewMode();
+
+    function loadTreeExpand() {
+      // Default: every known root is expanded on first load. Stored as a
+      // boolean map keyed by path so toggling a section persists across
+      // reloads but new categories appear expanded by default.
+      try {
+        const raw = localStorage.getItem(TREE_EXPAND_KEY);
+        return raw ? JSON.parse(raw) : {};
+      } catch { return {}; }
+    }
+    function saveTreeExpand(m) {
+      try { localStorage.setItem(TREE_EXPAND_KEY, JSON.stringify(m)); } catch {}
+    }
+    let treeExpand = loadTreeExpand();
+    function sectionExpanded(path) {
+      // Missing entry = expanded (default). Use treeExpand[path] === false
+      // to explicitly collapse.
+      return treeExpand[path] !== false;
+    }
+    function toggleSection(path) {
+      treeExpand[path] = !sectionExpanded(path);
+      saveTreeExpand(treeExpand);
+    }
+
+    /** "Claude Code/Skills" → ["Claude Code", "Skills"]. Empty / falsy → []. */
+    function categoryParts(path) {
+      if (!path) return [];
+      return String(path).split("/").map(p => p.trim()).filter(Boolean);
+    }
+    function categoryParent(path) {
+      const parts = categoryParts(path);
+      return parts.length < 2 ? null : parts.slice(0, -1).join("/");
+    }
+    function categoryLeaf(path) {
+      const parts = categoryParts(path);
+      return parts[parts.length - 1] || "";
+    }
+    function categoryDepth(path) { return categoryParts(path).length; }
+    function categoryChildren(path) {
+      return CATEGORIES.filter(c => categoryParent(c) === path);
+    }
+    function categoryExists(path) { return CATEGORIES.includes(path); }
+
+    /** Tree-aware option list for `<select>` cells.
+     *  Children show with a "↳ <leaf>" indent token. Native <select> can't
+     *  CSS-indent options reliably across browsers, so the indent is part
+     *  of the option text. The collapsed cell will read "↳ Skills" which
+     *  conveys the level; full path is on the title attribute. */
+    function categoryOptions(selectedPath) {
+      const roots = CATEGORIES.filter(c => !categoryParent(c)).slice().sort();
+      const parts = [`<option value="">(no category)</option>`];
+      roots.forEach(root => {
+        const rSel = root === selectedPath ? "selected" : "";
+        parts.push(`<option value="${escapeHtml(root)}" ${rSel}>${escapeHtml(root)}</option>`);
+        CATEGORIES.filter(c => categoryParent(c) === root).slice().sort().forEach(ch => {
+          const cSel = ch === selectedPath ? "selected" : "";
+          parts.push(`<option value="${escapeHtml(ch)}" ${cSel}>  ↳ ${escapeHtml(categoryLeaf(ch))}</option>`);
+        });
+      });
+      // If the persisted path is no longer in CATEGORIES (e.g. user deleted
+      // it elsewhere), surface it so we don't silently flip the selection.
+      if (selectedPath && !CATEGORIES.includes(selectedPath)) {
+        parts.push(`<option value="${escapeHtml(selectedPath)}" selected>${escapeHtml(selectedPath)} (orphan)</option>`);
+      }
+      return parts.join("");
+    }
+
+    /** Same shape as categoryOptions but with "All / (no category)" prefix. */
+    function categoryFilterOptions(selected) {
+      const out = [
+        `<option value="">All categories</option>`,
+        `<option value="(none)">(no category)</option>`,
+      ];
+      const roots = CATEGORIES.filter(c => !categoryParent(c)).slice().sort();
+      roots.forEach(root => {
+        out.push(`<option value="${escapeHtml(root)}">${escapeHtml(root)}</option>`);
+        CATEGORIES.filter(c => categoryParent(c) === root).slice().sort().forEach(ch => {
+          out.push(`<option value="${escapeHtml(ch)}">  ↳ ${escapeHtml(categoryLeaf(ch))}</option>`);
+        });
+      });
+      return out.join("");
+    }
+
+    /** Phase 17: category auto-suggest. Mirrors Phase 14's suggestProjectTag
+     *  but checks specific known clusters first (Claude Code + a child),
+     *  then generic full-path and leaf matches. Visual hint only — doesn't
+     *  persist until the user actively picks a value. */
+    function suggestCategory(description) {
+      if (!description) return null;
+      const text = String(description).toLowerCase();
+      // Specific clusters: Claude Code with optional child specialization.
+      if (/\bclaude\s*code\b/.test(text) && categoryExists("Claude Code")) {
+        if (/\bskill/.test(text) && categoryExists("Claude Code/Skills")) return "Claude Code/Skills";
+        if (/\bplugin/.test(text) && categoryExists("Claude Code/Plugins")) return "Claude Code/Plugins";
+        return "Claude Code";
+      }
+      if (/\bhermes\b/.test(text) && categoryExists("Hermes Agent")) return "Hermes Agent";
+      if (/\bnotebook\s*lm\b/.test(text) && categoryExists("NotebookLM")) return "NotebookLM";
+      if (/\b(ui\s*design|interface\s*design|ux\s*design)\b/.test(text) && categoryExists("UI Design")) {
+        return "UI Design";
+      }
+      // Generic: try full path match first (children before parents because
+      // they're more specific), then leaf word-boundary match.
+      const sorted = CATEGORIES.slice().sort((a, b) => categoryDepth(b) - categoryDepth(a));
+      for (const cat of sorted) {
+        if (text.includes(cat.toLowerCase())) return cat;
+      }
+      for (const cat of sorted) {
+        const leaf = categoryLeaf(cat).toLowerCase();
+        if (leaf.length < 3) continue;
+        const escaped = leaf.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        try {
+          if (new RegExp(`\\b${escaped}\\b`, "i").test(text)) return cat;
+        } catch { /* skip on regex errors */ }
+      }
+      return null;
+    }
 
     function loadState() {
       try { return JSON.parse(localStorage.getItem(STATE_KEY) || "{}"); }
@@ -1662,7 +1959,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function getAnnot(id) {
-      return state[id] || { nlm_pasted: false, project_tag: "None", note: "" };
+      return state[id] || { nlm_pasted: false, project_tag: "None", note: "", category_path: null };
     }
 
     /** Phase 14: pre-select a project tag in the dropdown when the video's
@@ -1819,6 +2116,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     let filterStatus = ui.filterStatus || "";
     let filterNlm = ui.filterNlm || "";
     let filterProject = ui.filterProject || "";
+    let filterCategory = ui.filterCategory || "";
 
     document.getElementById("q").value = q;
     document.getElementById("filter-transcript").value = filterTranscript;
@@ -1837,8 +2135,18 @@ HTML_TEMPLATE = r"""<!doctype html>
     });
     projSel.value = filterProject;
 
+    // Phase 17: populate category filter — re-uses categoryFilterOptions so
+    // the tree renders the same way as the row dropdowns.
+    function refreshCategoryFilter() {
+      const catSel = document.getElementById("filter-category");
+      if (!catSel) return;
+      catSel.innerHTML = categoryFilterOptions();
+      catSel.value = filterCategory;
+    }
+    refreshCategoryFilter();
+
     function persistUI() {
-      saveUI({ sortKey, sortDir, q, filterTranscript, filterStatus, filterNlm, filterProject });
+      saveUI({ sortKey, sortDir, q, filterTranscript, filterStatus, filterNlm, filterProject, filterCategory });
     }
 
     function renderStats() {
@@ -1897,12 +2205,21 @@ HTML_TEMPLATE = r"""<!doctype html>
           return a.project_tag === filterProject;
         });
       }
+      // Phase 17: category filter — parent value also matches its children.
+      if (filterCategory) {
+        rows = rows.filter(r => {
+          const cp = getAnnot(r.id).category_path;
+          if (filterCategory === "(none)") return !cp;
+          if (!cp) return false;
+          return cp === filterCategory || categoryParent(cp) === filterCategory;
+        });
+      }
       if (ql) {
         rows = rows.filter(r => {
           const a = getAnnot(r.id);
           const hay = [
             r.title, r.uploader, r.source, r.work_dir, r.transcript_source, r.status,
-            r.transcript_preview, a.note, a.project_tag,
+            r.transcript_preview, a.note, a.project_tag, a.category_path,
           ].filter(Boolean).join(" ").toLowerCase();
           return hay.includes(ql);
         });
@@ -1910,7 +2227,10 @@ HTML_TEMPLATE = r"""<!doctype html>
 
       rows.sort((a, b) => {
         let av, bv;
-        if (sortKey === "project_tag") {
+        if (sortKey === "category_path") {
+          av = (getAnnot(a.id).category_path || "~~~");  // uncategorized last
+          bv = (getAnnot(b.id).category_path || "~~~");
+        } else if (sortKey === "project_tag") {
           av = (getAnnot(a.id).project_tag || "None");
           bv = (getAnnot(b.id).project_tag || "None");
         } else if (sortKey === "nlm_pasted") {
@@ -1932,7 +2252,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       }
       empty.style.display = "none";
 
-      tbody.innerHTML = rows.map(r => {
+      const rowHtmls = rows.map(r => {
         const a = getAnnot(r.id);
         const tFrame = r.first_frame_path ? fileUri(r.first_frame_path) : "";
         const workUri = r.work_dir ? fileUri(r.work_dir) : "";
@@ -1973,6 +2293,26 @@ HTML_TEMPLATE = r"""<!doctype html>
         const projectOptions = tagsForRow.map(t =>
           `<option value="${escapeHtml(t)}" ${t === effectiveTag ? "selected" : ""}>${t === "None" ? "(none)" : escapeHtml(t)}</option>`
         ).join("");
+
+        // Phase 17: Category dropdown — same visual-suggestion rule as Project.
+        // If the user hasn't picked a category yet AND the description hints
+        // at one, surface it in the dropdown as a hint (not persisted).
+        let effectiveCategory = a.category_path || "";
+        let categoryHint = null;
+        if (!state[r.id] || !a.category_path) {
+          categoryHint = suggestCategory(r.description_excerpt);
+          if (categoryHint && !effectiveCategory && categoryExists(categoryHint)) {
+            effectiveCategory = categoryHint;
+          }
+        }
+        const categoryOptionsHtml = categoryOptions(effectiveCategory);
+        const categoryTitle = effectiveCategory
+          ? `Category: ${effectiveCategory}${categoryHint && categoryHint === effectiveCategory && !a.category_path ? " (suggested)" : ""}`
+          : "No category — pick one to organize this row";
+        const categoryClasses = [
+          effectiveCategory ? "tagged" : "",
+          (categoryHint && !a.category_path) ? "suggested" : "",
+        ].filter(Boolean).join(" ");
 
         // Phase 12: legacy rows (created before --preview existed) have no
         // preview.json, so the Mark button can't render. Surface a Refresh
@@ -2018,6 +2358,9 @@ HTML_TEMPLATE = r"""<!doctype html>
           <td class="tag-cell">
             <select data-action="tag" class="${effectiveTag && effectiveTag !== 'None' ? 'tagged' : ''}">${projectOptions}</select>
           </td>
+          <td class="cat-cell">
+            <select data-action="category" class="${categoryClasses}" title="${escapeHtml(categoryTitle)}">${categoryOptionsHtml}</select>
+          </td>
           <td class="nlm-cell">
             <input type="checkbox" data-action="nlm" ${a.nlm_pasted ? "checked" : ""} title="Mark pasted to NLM">
           </td>
@@ -2026,7 +2369,103 @@ HTML_TEMPLATE = r"""<!doctype html>
           </td>
           <td class="actions">${actionParts.join("")}</td>
         </tr>`;
-      }).join("");
+      });
+      // Phase 17: dispatch to either flat or tree rendering. The row HTML
+      // strings are identical in both modes — only the wrapping changes.
+      if (viewMode === "tree") {
+        tbody.innerHTML = renderTreeBody(rows, rowHtmls);
+      } else {
+        tbody.innerHTML = rowHtmls.join("");
+      }
+    }
+
+    /** Phase 17: tree-mode body — single tbody, sections as full-width rows.
+     *  Keeping everything in the same tbody means the existing row event
+     *  delegation (#rows click/change handlers) keeps working without a
+     *  per-section rebind. */
+    function renderTreeBody(rows, rowHtmls) {
+      // Group row html strings by category path.
+      const byPath = new Map();
+      rows.forEach((r, i) => {
+        const path = getAnnot(r.id).category_path || "";
+        if (!byPath.has(path)) byPath.set(path, []);
+        byPath.get(path).push(rowHtmls[i]);
+      });
+      // Roots: declared CATEGORIES roots first (alphabetical), then any
+      // orphan roots present only in data.
+      const declaredRoots = CATEGORIES.filter(c => !categoryParent(c)).slice().sort();
+      const dataRoots = new Set();
+      byPath.forEach((_, p) => {
+        if (!p) return;
+        const root = categoryParts(p)[0];
+        if (root) dataRoots.add(root);
+      });
+      const orphanRoots = Array.from(dataRoots).filter(r => !declaredRoots.includes(r)).sort();
+      const allRoots = declaredRoots.concat(orphanRoots);
+
+      const out = [];
+      allRoots.forEach(root => {
+        const direct = byPath.get(root) || [];
+        const knownChildren = CATEGORIES
+          .filter(c => categoryParent(c) === root).slice().sort();
+        const subs = [];
+        knownChildren.forEach(child => {
+          const childRows = byPath.get(child) || [];
+          if (childRows.length) subs.push({ path: child, rows: childRows });
+        });
+        // Orphan children (path under root that's no longer in CATEGORIES)
+        byPath.forEach((rows, path) => {
+          if (categoryParent(path) === root && !CATEGORIES.includes(path)) {
+            subs.push({ path, rows });
+          }
+        });
+
+        const total = direct.length + subs.reduce((s, x) => s + x.rows.length, 0);
+        if (total === 0) return;
+        const expanded = sectionExpanded(root);
+        out.push(treeSectionRow(root, root, total, expanded));
+        if (!expanded) return;
+        if (direct.length > 0) {
+          if (subs.length > 0) {
+            out.push(treeSubsectionRow(`(uncategorized in ${root})`, direct.length));
+          }
+          out.push(direct.join(""));
+        }
+        subs.forEach(sub => {
+          out.push(treeSubsectionRow(categoryLeaf(sub.path), sub.rows.length));
+          out.push(sub.rows.join(""));
+        });
+      });
+
+      // Uncategorized at end, always rendered if it has rows.
+      const uncat = byPath.get("") || [];
+      if (uncat.length > 0) {
+        const expanded = sectionExpanded("(uncategorized)");
+        out.push(treeSectionRow("(uncategorized)", "(no category)", uncat.length, expanded));
+        if (expanded) out.push(uncat.join(""));
+      }
+      return out.join("");
+    }
+
+    function treeSectionRow(path, label, count, expanded) {
+      return `<tr class="tree-section-row" data-tree-path="${escapeHtml(path)}">
+        <td colspan="100">
+          <button class="tree-toggle" data-tree-path="${escapeHtml(path)}" type="button">
+            <span class="tree-caret">${expanded ? "▼" : "▶"}</span>
+            <span class="tree-name">${escapeHtml(label)}</span>
+            <span class="tree-count">${count} row${count === 1 ? "" : "s"}</span>
+          </button>
+        </td>
+      </tr>`;
+    }
+
+    function treeSubsectionRow(label, count) {
+      return `<tr class="tree-subsection-row">
+        <td colspan="100">
+          <span class="tree-sub-name">↳ ${escapeHtml(label)}</span>
+          <span class="tree-count">${count} row${count === 1 ? "" : "s"}</span>
+        </td>
+      </tr>`;
     }
 
     function fullRender() { renderStats(); render(); }
@@ -2043,14 +2482,33 @@ HTML_TEMPLATE = r"""<!doctype html>
         setAnnot(id, { project_tag: e.target.value });
         renderStats();
         if (e.target.value !== "None") e.target.classList.add("tagged"); else e.target.classList.remove("tagged");
+      } else if (action === "category") {
+        // Phase 17: empty string ("(no category)") clears; anything else is a path.
+        const next = e.target.value || null;
+        setAnnot(id, { category_path: next });
+        renderStats();
+        e.target.classList.toggle("tagged", !!next);
+        e.target.classList.remove("suggested");
+        // In tree view, a category change means the row may need to move
+        // to a different section — easiest is to re-render.
+        if (viewMode === "tree") render();
       } else if (action === "note") {
         setAnnot(id, { note: e.target.value });
       }
     });
 
     document.getElementById("rows").addEventListener("click", e => {
+      // Phase 17: tree section toggles — must run before the row-id lookup
+      // because section rows don't carry data-id.
+      const tt = e.target.closest(".tree-toggle");
+      if (tt) {
+        toggleSection(tt.dataset.treePath);
+        render();
+        return;
+      }
       const tr = e.target.closest("tr"); if (!tr) return;
       const id = tr.dataset.id;
+      if (!id) return;  // section rows / subsection rows
       const action = e.target.dataset.action;
 
       if (e.target.tagName === "IMG" && e.target.dataset.frame) {
@@ -2873,10 +3331,11 @@ HTML_TEMPLATE = r"""<!doctype html>
     bindFilter("filter-status", v => filterStatus = v);
     bindFilter("filter-nlm", v => filterNlm = v);
     bindFilter("filter-project", v => filterProject = v);
+    bindFilter("filter-category", v => filterCategory = v);
 
     document.getElementById("clear-filters").addEventListener("click", () => {
-      q = ""; filterTranscript = ""; filterStatus = ""; filterNlm = ""; filterProject = "";
-      ["q","filter-transcript","filter-status","filter-nlm","filter-project"].forEach(id => document.getElementById(id).value = "");
+      q = ""; filterTranscript = ""; filterStatus = ""; filterNlm = ""; filterProject = ""; filterCategory = "";
+      ["q","filter-transcript","filter-status","filter-nlm","filter-project","filter-category"].forEach(id => document.getElementById(id).value = "");
       persistUI(); fullRender();
     });
 
@@ -2917,6 +3376,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         document.getElementById("img-modal-bg").classList.remove("show");
         document.getElementById("result-modal-bg").classList.remove("show");
         document.getElementById("projects-modal-bg").classList.remove("show");
+        document.getElementById("categories-modal-bg").classList.remove("show");
         document.getElementById("confirm-modal-bg").classList.remove("show");
         document.getElementById("orphans-modal-bg").classList.remove("show");
         document.getElementById("disk-modal-bg").classList.remove("show");
@@ -3262,6 +3722,230 @@ HTML_TEMPLATE = r"""<!doctype html>
     document.getElementById("projects-reset").addEventListener("click", () => {
       if (!confirm("Reset project tags to the seeded defaults? Existing row tags are preserved (they'll show as 'orphan' tags until you re-add them).")) return;
       commitProjectsChange(PROJECT_TAGS_SEED.slice());
+    });
+
+    // ── Phase 17: Manage Categories modal ────────────────────────────────────
+
+    function countCategoryRows(path) {
+      // A row counts under "path" if its category_path === path. Parent
+      // counts include only directly-tagged rows, not children (children
+      // get counted under their own subsection).
+      return RECORDS.reduce((n, r) =>
+        n + (getAnnot(r.id).category_path === path ? 1 : 0), 0);
+    }
+
+    function clearCategoryFromAll(path) {
+      let changed = false;
+      RECORDS.forEach(r => {
+        const a = getAnnot(r.id);
+        if (a.category_path === path) {
+          setAnnot(r.id, { category_path: null });
+          changed = true;
+        }
+      });
+      return changed;
+    }
+
+    function renameCategoryPathOnAll(oldPath, newPath) {
+      // Rename exact matches AND children whose path starts with oldPath + "/".
+      const prefix = oldPath + "/";
+      RECORDS.forEach(r => {
+        const a = getAnnot(r.id);
+        if (!a.category_path) return;
+        if (a.category_path === oldPath) {
+          setAnnot(r.id, { category_path: newPath });
+        } else if (a.category_path.startsWith(prefix)) {
+          setAnnot(r.id, { category_path: newPath + a.category_path.slice(oldPath.length) });
+        }
+      });
+    }
+
+    function validateCategoryName(name, parent, exclude) {
+      const trimmed = String(name || "").trim();
+      if (!trimmed) return "Name can't be empty";
+      if (trimmed.length > 32) return "Max 32 chars";
+      if (trimmed.includes("/")) return "No '/' in name — use Add child for sub-categories";
+      const newPath = parent ? `${parent}/${trimmed}` : trimmed;
+      if (categoryDepth(newPath) > 2) return "Max depth is 2 (parent / child)";
+      if (CATEGORIES.includes(newPath) && newPath !== exclude) {
+        return parent ? "A sibling with that name already exists" : "A root with that name already exists";
+      }
+      return null;
+    }
+
+    function showCategoryValidation(msg) {
+      const el = document.getElementById("categories-validation");
+      if (!msg) { el.hidden = true; el.textContent = ""; return; }
+      el.hidden = false;
+      el.textContent = msg;
+    }
+
+    function openCategories() {
+      showCategoryValidation(null);
+      document.getElementById("categories-add-input").value = "";
+      renderCategoriesList();
+      document.getElementById("categories-modal-bg").classList.add("show");
+    }
+    function closeCategories() {
+      document.getElementById("categories-modal-bg").classList.remove("show");
+    }
+
+    function renderCategoriesList() {
+      const ul = document.getElementById("categories-list");
+      const roots = CATEGORIES.filter(c => !categoryParent(c)).slice().sort();
+      if (roots.length === 0) {
+        ul.innerHTML = `<li class="categories-empty">No categories yet. Add a root below.</li>`;
+        return;
+      }
+      const html = roots.map(root => {
+        const rootCount = countCategoryRows(root);
+        const children = CATEGORIES.filter(c => categoryParent(c) === root).slice().sort();
+        const childItems = children.map(ch => {
+          const chCount = countCategoryRows(ch);
+          return `<li class="cat-child" data-path="${escapeHtml(ch)}">
+            <span class="cat-name">↳ ${escapeHtml(categoryLeaf(ch))}</span>
+            <span class="cat-count">${chCount} row${chCount === 1 ? "" : "s"}</span>
+            <button class="icon" data-action="cat-rename" title="Rename">rename</button>
+            <button class="icon del" data-action="cat-del" title="Delete">delete</button>
+          </li>`;
+        }).join("");
+        return `<li class="cat-root" data-path="${escapeHtml(root)}">
+          <div class="cat-row">
+            <span class="cat-name">${escapeHtml(root)}</span>
+            <span class="cat-count">${rootCount} row${rootCount === 1 ? "" : "s"}</span>
+            <button class="icon" data-action="cat-rename" title="Rename">rename</button>
+            <button class="icon" data-action="cat-add-child" title="Add child category">+ child</button>
+            <button class="icon del" data-action="cat-del" title="Delete">delete</button>
+          </div>
+          ${children.length > 0 ? `<ul class="cat-children">${childItems}</ul>` : ""}
+        </li>`;
+      }).join("");
+      ul.innerHTML = html;
+    }
+
+    function commitCategoriesChange(nextList) {
+      CATEGORIES = nextList;
+      saveCategories(CATEGORIES);
+      // Filter dropdowns + row dropdowns all rebuild from CATEGORIES on render.
+      refreshCategoryFilter();
+      fullRender();
+      renderCategoriesList();
+    }
+
+    function addRootCategory(name) {
+      const err = validateCategoryName(name, null, null);
+      if (err) { showCategoryValidation(err); return; }
+      showCategoryValidation(null);
+      commitCategoriesChange(CATEGORIES.concat([name.trim()]));
+    }
+
+    function addChildCategory(parent, name) {
+      const err = validateCategoryName(name, parent, null);
+      if (err) { showCategoryValidation(err); return; }
+      showCategoryValidation(null);
+      const next = CATEGORIES.slice();
+      // Spec: child requires parent to exist as a separate entry.
+      if (!next.includes(parent)) next.push(parent);
+      next.push(`${parent}/${name.trim()}`);
+      commitCategoriesChange(next);
+    }
+
+    function renameCategory(li, oldPath) {
+      const span = li.querySelector(".cat-name");
+      if (!span) return;
+      const currentLeaf = categoryLeaf(oldPath);
+      const parent = categoryParent(oldPath);
+      span.classList.add("editing");
+      const prefix = parent ? "↳ " : "";
+      span.innerHTML = `${prefix}<input type="text" maxlength="32" value="${escapeHtml(currentLeaf)}">`;
+      const inp = span.querySelector("input");
+      inp.focus(); inp.select();
+      let done = false;
+      const finish = (commit) => {
+        if (done) return; done = true;
+        if (!commit) { renderCategoriesList(); return; }
+        const next = inp.value.trim();
+        const err = validateCategoryName(next, parent, oldPath);
+        if (err) { showCategoryValidation(err); done = false; inp.focus(); return; }
+        if (next === currentLeaf) { renderCategoriesList(); return; }
+        const newPath = parent ? `${parent}/${next}` : next;
+        const oldPrefix = oldPath + "/";
+        const nextList = CATEGORIES.map(c => {
+          if (c === oldPath) return newPath;
+          if (c.startsWith(oldPrefix)) return newPath + c.slice(oldPath.length);
+          return c;
+        });
+        renameCategoryPathOnAll(oldPath, newPath);
+        showCategoryValidation(null);
+        commitCategoriesChange(nextList);
+      };
+      inp.addEventListener("keydown", ev => {
+        if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+        else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+      });
+      inp.addEventListener("blur", () => finish(true), { once: true });
+    }
+
+    function deleteCategory(path) {
+      const children = CATEGORIES.filter(c => categoryParent(c) === path);
+      let parts = [];
+      const directCount = countCategoryRows(path);
+      if (directCount > 0) {
+        parts.push(`${directCount} row${directCount === 1 ? " is" : "s are"} tagged "${path}"`);
+      }
+      let totalChildren = children.length;
+      let childRowsCount = 0;
+      children.forEach(c => { childRowsCount += countCategoryRows(c); });
+      if (totalChildren > 0) {
+        parts.push(`${totalChildren} sub-categor${totalChildren === 1 ? "y" : "ies"}` +
+                   (childRowsCount > 0 ? ` with ${childRowsCount} tagged row${childRowsCount === 1 ? "" : "s"}` : ""));
+      }
+      const summary = parts.length ? `${parts.join(" and ")}.` : "";
+      const msg = summary
+        ? `Delete "${path}"? ${summary} Tags on those rows will be cleared.`
+        : `Delete "${path}"?`;
+      if (!confirm(msg)) return;
+      // Clear tags on the category + its children
+      clearCategoryFromAll(path);
+      children.forEach(c => clearCategoryFromAll(c));
+      const dropPrefix = path + "/";
+      commitCategoriesChange(CATEGORIES.filter(c => c !== path && !c.startsWith(dropPrefix)));
+      showCategoryValidation(null);
+    }
+
+    document.getElementById("manage-categories-btn").addEventListener("click", openCategories);
+    document.getElementById("categories-close").addEventListener("click", closeCategories);
+    document.getElementById("categories-modal-bg").addEventListener("click", e => {
+      if (e.target.id === "categories-modal-bg") closeCategories();
+    });
+    document.getElementById("categories-add-btn").addEventListener("click", () => {
+      addRootCategory(document.getElementById("categories-add-input").value);
+      document.getElementById("categories-add-input").value = "";
+    });
+    document.getElementById("categories-add-input").addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        document.getElementById("categories-add-btn").click();
+      }
+    });
+    document.getElementById("categories-list").addEventListener("click", e => {
+      const li = e.target.closest("li.cat-root, li.cat-child");
+      if (!li) return;
+      const path = li.dataset.path;
+      const action = e.target.dataset.action;
+      if (!path || !action) return;
+      if (action === "cat-rename") { renameCategory(li, path); return; }
+      if (action === "cat-add-child") {
+        const name = prompt(`Add child under "${path}":`, "");
+        if (name == null) return;
+        addChildCategory(path, name);
+        return;
+      }
+      if (action === "cat-del") { deleteCategory(path); return; }
+    });
+    document.getElementById("categories-reset").addEventListener("click", () => {
+      if (!confirm("Reset categories to the seeded defaults? Tags on rows are preserved (they'll show as 'orphan' until you re-add the categories).")) return;
+      commitCategoriesChange(CATEGORIES_SEED.slice());
     });
 
     // ── Server mode: job modal, manifest poll, connection indicator ──────────
@@ -4191,6 +4875,26 @@ HTML_TEMPLATE = r"""<!doctype html>
         orphansBtn.addEventListener("click", openOrphansModal);
       }
     }
+
+    // Phase 17: view-mode toggle (table / tree). Apply current setting
+    // before the first render so the body class is in sync.
+    function setViewMode(mode) {
+      if (mode !== "table" && mode !== "tree") mode = "table";
+      viewMode = mode;
+      saveViewMode(mode);
+      document.documentElement.classList.toggle("view-tree", mode === "tree");
+      document.documentElement.classList.toggle("view-table", mode === "table");
+      document.querySelectorAll("#view-toggle .view-btn").forEach(b => {
+        b.classList.toggle("active", b.dataset.view === mode);
+      });
+    }
+    document.getElementById("view-toggle").addEventListener("click", e => {
+      const b = e.target.closest(".view-btn");
+      if (!b) return;
+      setViewMode(b.dataset.view);
+      fullRender();
+    });
+    setViewMode(viewMode);
 
     fullRender();
   </script>
